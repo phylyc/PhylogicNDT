@@ -45,6 +45,12 @@ def build_parser():
                              default='Indiv1',
                              help='Patient/Case ID')
 
+    base_parser.add_argument('--ref_build', '-R',
+                             type=str,
+                             action='store',
+                             default='hg19',
+                             help='Genome reference build (hg19/hg38)')
+
     # Samples information
     # Specifying samples on cmdline one-by-one in format sample_id:maf_fn:seg_fn:purity:timepoint
     base_parser.add_argument("-s", "--sample", dest='sample_data', action='append', type=str,

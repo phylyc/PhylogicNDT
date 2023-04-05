@@ -49,7 +49,8 @@ class Patient:
                  artifact_whitelist='',
                  use_indels=False,
                  min_coverage=8,
-                 PoN_file=False):
+                 PoN_file=False,
+                 ref_build = "hg19"):
 
         # DECLARATIONS
         self.indiv_name = indiv_name
@@ -73,6 +74,7 @@ class Patient:
         self.min_coverage = min_coverage
         self.use_indels = use_indels
         self.PoN_file = PoN_file
+        self.ref_build = ref_build
 
         self._validate_sample_names()
 
@@ -523,8 +525,8 @@ class Patient:
 
     def get_arm_level_cn_events(self):
         n_samples = len(self.sample_list)
-        for ckey, (chrom, csize) in enumerate(zip(list(map(str, range(1, 23))) + ['X', 'Y'], CSIZE)):
-            centromere = CENT_LOOKUP[ckey + 1]
+        for ckey, (chrom, csize) in enumerate(zip(list(map(str, range(1, 23))) + ['X', 'Y'], CSIZE[self.ref_build])):
+            centromere = CENT_LOOKUP[self.ref_build][ckey + 1]
             tree = IntervalTree()
             for sample in self.sample_list:
                 if sample.CnProfile:
