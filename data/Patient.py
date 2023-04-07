@@ -625,7 +625,8 @@ class Patient:
                         self._add_cn_event_to_samples(chrom, 0, 0, clique_arm, local_cn, cn_category, clique_ccf_hat, clique_ccf_high,
                                                       clique_ccf_low)
 
-    def _add_cn_event_to_samples(self, chrom, start, end, arm, cns, cn_category, ccf_hat, ccf_high, ccf_low):
+    def _add_cn_event_to_samples(self, chrom, start, end, cns, mut_category, ccf_hat, ccf_high, ccf_low, a1,
+                                 dupe=False):
         """
         Adds CN event to sample in low_coverage_mutations attr and mut hashtable
 
@@ -635,8 +636,8 @@ class Patient:
             ccf_hat_i = ccf_hat[i] if local_cn != 1. else 0.
             ccf_high_i = ccf_high[i] if local_cn != 1. else 0.
             ccf_low_i = ccf_low[i] if local_cn != 1. else 0.
-            cn = CopyNumberEvent(chrom, cn_category, start=start, end=end, ccf_hat=ccf_hat_i, ccf_high=ccf_high_i, ccf_low=ccf_low_i,
-                                 local_cn=local_cn, from_sample=sample, arm=arm)
+            cn = CopyNumberEvent(chrom, start, end, ccf_hat=ccf_hat_i, ccf_high=ccf_high_i, ccf_low=ccf_low_i,
+                                 local_cn=local_cn, from_sample=sample, a1=a1, mut_category=mut_category, dupe=dupe)
             sample.low_coverage_mutations.update({cn.var_str: cn})
             sample.add_muts_to_hashtable(cn)
 
