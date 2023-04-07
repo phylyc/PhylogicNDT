@@ -190,6 +190,10 @@ def build_parser():
                             default=None,
                             help='interval file with focal amp and del regions specified')
 
+    clustering.add_argument('--disable_CNs',
+                            action='store_true',
+                            help="Don't use copy number events in clustering, which can hang method indefinitely")
+
     clustering.add_argument('--Pi_k_r',
                             type=int,
                             action='store',

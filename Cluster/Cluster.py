@@ -76,7 +76,8 @@ def run_tool(args):
             if len(patient_data.sample_list) == args.n_samples:  # use only first N samples
                 break
 
-    patient_data.intersect_cn_trees()
+    if not args.disable_CNs:
+        patient_data.intersect_cn_trees()
     patient_data.preprocess_samples()
 
     # TODO: how 1D (one sample) is handeled
