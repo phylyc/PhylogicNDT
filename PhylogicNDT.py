@@ -267,6 +267,9 @@ def build_parser():
                            dest='n_iter',
                            default=250,
                            help='number iterations')
+    buildtree.add_argument('--disable_mut_shuffle',
+                            action='store_true',
+                            help="Don't reassign mutations during tree building")
     # Specifying cluster ids to blacklist from BuildTree and CellPopulation
     buildtree.add_argument("-bc", "--blacklist_cluster",
                             dest='blacklist_cluster',
