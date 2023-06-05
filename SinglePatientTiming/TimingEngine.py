@@ -7,21 +7,12 @@ from scipy.special import logsumexp
 import random
 from data.Enums import CSIZE, CENT_LOOKUP, _chromosomes, _arms, _cn_state_whitelist
 
-#TODO: get rid of these globals
-#_chromosomes = tuple(map(str, range(1, 23))) + ('X',)
-#_arms = 'pq'
-#_cn_state_whitelist = frozenset({(1., 2.), (0., 2.), (2., 2.)})
-#CSIZE = dict(zip(_chromosomes, CSIZE))
-#CENT_LOOKUP = {str(c): v for c, v in CENT_LOOKUP.items()}
-#CENT_LOOKUP['X'] = CENT_LOOKUP['23']
-
-
 class TimingEngine(object):
     """
     Class for holding samples
     """
     def __init__(self, patient, cn_state_whitelist=_cn_state_whitelist, chromosomes=_chromosomes,
-                 arms=_arms, ref_build="hg19", in_supporting_muts=3):
+                 arms=_arms, ref_build="hg19", min_supporting_muts=3):
         self.patient = patient
         self.cn_state_whitelist = cn_state_whitelist
         self.arm_regions = list(itertools.product(chromosomes, arms))
@@ -236,6 +227,7 @@ class TimingSample(object):
         self.sample = sample
         self.sample_name = self.sample.sample_name
         self.engine = engine
+        self.ref_build = ref_build
         self.cn_state_whitelist = cn_state_whitelist
         self.purity = self.sample.purity
         self.CnProfile = self.sample.CnProfile
@@ -297,10 +289,9 @@ class TimingSample(object):
                     self.concordant_mutation_intervaltree[mut.chrN][mut.pos:mut.pos + 1] = timing_mut
 
     def call_arm_level_cn_states(self, size_threshold=.4, concordant_states=None, tol=.2):
-        CENT_LOOKUP = {str(c): v for c, v in CENT_LOOKUP[self.ref_build].items()}
-        CENT_LOOKUP['X'] = CENT_LOOKUP['23']
-        #chromosomes = tuple(map(str, range(1, 23))) + ('X',)
-        CSIZE = dict(zip(self._chromosomes, CSIZE[self.ref_build]))
+        centromeres = {str(c): v for c, v in CENT_LOOKUP[self.ref_build].items()}
+        centromeres['X'] = centromeres['23']
+        chromosome_sizes = dict(zip(self._chromosomes, CSIZE[self.ref_build]))
         if concordant_states is None:
             self.cn_states = {}
         else:
@@ -308,7 +299,7 @@ class TimingSample(object):
         self.missing_arms = []
         full_segtree = self.CnProfile
         for chrN, arm in self.arm_regions:
-            centromere = CENT_LOOKUP[chrN]
+            centromere = centromeres[chrN]
             if arm == 'p':
                 arm_segtree = full_segtree[chrN][:centromere]
                 start = 0
@@ -316,7 +307,7 @@ class TimingSample(object):
             else:
                 arm_segtree = full_segtree[chrN][centromere:]
                 start = centromere
-                end = CSIZE[self.ref_build][chrN]
+                end = chromosome_sizes[chrN]
             true_arm_bp = end - start
             arm_bp = 0
             state_bps = {}
