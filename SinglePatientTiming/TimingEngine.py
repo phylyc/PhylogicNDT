@@ -5,15 +5,15 @@ import scipy.stats
 import scipy.interpolate
 from scipy.special import logsumexp
 import random
-from data.Enums import CSIZE, CENT_LOOKUP
+from data.Enums import CSIZE, CENT_LOOKUP, _chromosomes, _arms, _cn_state_whitelist
 
 #TODO: get rid of these globals
-_chromosomes = tuple(map(str, range(1, 23))) + ('X',)
-_arms = 'pq'
-_cn_state_whitelist = frozenset({(1., 2.), (0., 2.), (2., 2.)})
-CSIZE = dict(zip(_chromosomes, CSIZE))
-CENT_LOOKUP = {str(c): v for c, v in CENT_LOOKUP.items()}
-CENT_LOOKUP['X'] = CENT_LOOKUP['23']
+#_chromosomes = tuple(map(str, range(1, 23))) + ('X',)
+#_arms = 'pq'
+#_cn_state_whitelist = frozenset({(1., 2.), (0., 2.), (2., 2.)})
+#CSIZE = dict(zip(_chromosomes, CSIZE))
+#CENT_LOOKUP = {str(c): v for c, v in CENT_LOOKUP.items()}
+#CENT_LOOKUP['X'] = CENT_LOOKUP['23']
 
 
 class TimingEngine(object):
@@ -297,6 +297,10 @@ class TimingSample(object):
                     self.concordant_mutation_intervaltree[mut.chrN][mut.pos:mut.pos + 1] = timing_mut
 
     def call_arm_level_cn_states(self, size_threshold=.4, concordant_states=None, tol=.2):
+        CENT_LOOKUP = {str(c): v for c, v in CENT_LOOKUP[self.ref_build].items()}
+        CENT_LOOKUP['X'] = CENT_LOOKUP['23']
+        #chromosomes = tuple(map(str, range(1, 23))) + ('X',)
+        CSIZE = dict(zip(self._chromosomes, CSIZE[self.ref_build]))
         if concordant_states is None:
             self.cn_states = {}
         else:
