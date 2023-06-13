@@ -112,4 +112,5 @@ def run_tool(args):
         args.mutation_ccf_file = '{}.mut_ccfs.txt'.format(patient_data.indiv_name)
         args.n_iter = args.iter
         args.blacklist_cluster = None
+        args.disable_mut_shuffle = False
         BuildTree.BuildTree.run_tool(args)
