@@ -316,8 +316,8 @@ class TumorSample:
                 try:
                     # assume ccf at the end of the split since headers vary for this one.
                     ccf = [float(spl[x]) for x in ccf_bins_location]
-                except ValueError:
-                    logging.warning('Mutation with no CCF estimate... skipping')
+                except (ValueError, IndexError):
+                    logging.warning('Skipping mutation with no CCF estimate: %s:%s', spl[h["Chromosome"]], spl[h["Start_position"]])
                     continue
 
             if len(ccf) != 101:
