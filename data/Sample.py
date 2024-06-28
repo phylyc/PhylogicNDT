@@ -60,7 +60,8 @@ class TumorSample:
                  seg_file=None,
                  purity=None,
                  timepoint_value=None,
-                 seg_input_type='auto'):
+                 seg_input_type='auto',
+                 coding_only=False):
 
         # Reference to Patient object
         self.indiv = indiv
@@ -89,7 +90,8 @@ class TumorSample:
         self.mutations = self._load_sample_ccf(file_name, input_type,
                                                min_coverage=min_coverage,
                                                use_indels=use_indels,
-                                               _additional_muts=_additional_muts)  # a list of SomMutation objects
+                                               _additional_muts=_additional_muts,
+                                               coding_only=coding_only)  # a list of SomMutation objects
 
         self.CnProfile = self._resolve_CnEvents(seg_file, input_type=seg_input_type, purity=purity)
 
@@ -116,7 +118,7 @@ class TumorSample:
     def get_mut_by_varstr(self, variant_string):
         return self._mut_varstring_hashtable[variant_string]
 
-    def _load_sample_ccf(self, filen, input_type='auto', min_coverage=8, use_indels=False, _additional_muts=None):
+    def _load_sample_ccf(self, filen, input_type='auto', min_coverage=8, use_indels=False, _additional_muts=None, coding_only=False):
         """ Accepted input types abs; txt; sqlite3 .db;
             auto tab if .txt, .tsv or .tab ; abs if .Rdata; sqlite if .db """
 
@@ -163,6 +165,12 @@ class TumorSample:
 
             if mut.var_str in self.known_blacklisted_mut:
                 logging.info("Removed mutation {} in sample {}".format(mut.var_str, self.sample_name))
+                mut.blacklist_status = True
+
+            # per https://docs.gdc.cancer.gov/Encyclopedia/pages/Mutation_Annotation_Format_TCGAv2/#:~:text=%7BIntron
+            # %2C%205%27UTR%2C%203%27UTR%2C%205%27Flank%2C%203%27Flank%2C%20IGR%7D
+            if ( coding_only and mut.mut_category in ["RNA", "Intron", "5'UTR", "3'UTR", "5'Flank", "3'Flank", "IGR", "Silent"]):
+                logging.info("Removed non-coding or silent mutation {} in sample {}".format(mut.var_str, self.sample_name))
                 mut.blacklist_status = True
 
             logging.info("Loaded mutation {} {}; ".format(mut.gene, mut.prot_change))

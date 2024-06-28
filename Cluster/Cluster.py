@@ -24,10 +24,15 @@ def run_tool(args):
 
     # init a Patient
     patient_data = Patient.Patient(artifact_blacklist=args.artifact_blacklist,
-                                   PoN_file=PoN, indiv_name=args.indiv_id, artifact_whitelist=args.artifact_whitelist,
-                                   min_coverage=args.min_cov, use_indels=args.use_indels,
+                                   PoN_file=PoN,
+                                   indiv_name=args.indiv_id,
+                                   artifact_whitelist=args.artifact_whitelist,
+                                   min_coverage=args.min_cov,
+                                   use_indels=args.use_indels,
+                                   coding_only=args.coding_only,
                                    impute_missing=args.impute_missing,
-                                   driver_genes_file=args.driver_genes_file, ref_build = args.ref_build)
+                                   driver_genes_file=args.driver_genes_file,
+                                   ref_build = args.ref_build)
 
     # delete_auto_bl=args.Delete_Blacklist,
     # Load sample data

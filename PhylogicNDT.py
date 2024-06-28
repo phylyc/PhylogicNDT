@@ -125,6 +125,13 @@ def build_parser():
                             dest='buildtree',
                             help='Run the BuildTree Module right after clustering and generate joint report')
 
+    # run Cluster and BuildTree  together
+    clustering.add_argument('--coding_only', '-co',
+                            action="store_true",
+                            dest='coding_only',
+                            help='Run clustering with nonsilent, coding mutations only (MAF Variant_Classification field)')
+
+
     # option for specifying PoN - will be used to append to blacklist.
     clustering.add_argument('--PoN',
                             type=str,

@@ -47,6 +47,7 @@ class Patient:
                  impute_missing=False,
                  artifact_blacklist=os.path.join(os.path.dirname(__file__), 'supplement_data/Blacklist_SNVs.txt'),
                  artifact_whitelist='',
+                 coding_only=False,
                  use_indels=False,
                  min_coverage=8,
                  PoN_file=False,
@@ -55,6 +56,7 @@ class Patient:
         # DECLARATIONS
         self.cytoband_dict = {}
         self.ref_build = ref_build
+
 
         self.read_cytoband_file()
 
@@ -77,6 +79,8 @@ class Patient:
         self.impute_missing = impute_missing
         # min cov is specified both here and passed to tumor sample.
         self.min_coverage = min_coverage
+        # for QCing genome mode. relies on Variant_Classification from MAF file
+        self.coding_only = coding_only
         self.use_indels = use_indels
         self.PoN_file = PoN_file
 
@@ -141,7 +145,7 @@ class Patient:
         logging.debug('{} genes will be used in the analysis.'.format(len(self.concordant_genes)))
 
     def addSample(self, filen, sample_name, input_type='auto', seg_input_type='auto', grid_size=101, seg_file=None,
-                  _additional_muts=None, purity=None, timepoint_value=None):
+                  _additional_muts=None, purity=None, timepoint_value=None, coding_only=False):
         """ accepted input types abs; txt; sqlite3 .db # auto tab if .txt, .tsv or .tab ; abs if .Rdata; sqlite if .db"""
 
         if _additional_muts == []:
@@ -154,6 +158,7 @@ class Patient:
         new_sample = TumorSample(filen, input_type, seg_input_type=seg_input_type, sample_name=sample_name,
                                  artifact_blacklist=self.PatientLevel_MutBlacklist,
                                  artifact_whitelist=self.PatientLevel_MutWhitelist,
+                                 coding_only=self.coding_only,
                                  ccf_grid_size=grid_size, PoN=self.PoN_file, indiv=self.indiv_name,
                                  use_indels=self.use_indels, min_coverage=self.min_coverage,
                                  _additional_muts=_additional_muts, seg_file=seg_file,
