@@ -457,10 +457,10 @@ class TumorSample:
                     try:
                         row = dict(zip(header, line.strip('\n').split('\t')))
                         chrN = row['Chromosome']
-                        start = int(float(row['Start']))
-                        end = int(float(row['End']))
-                        cn_a1 = float(row['A1.Seg.CN'])
-                        cn_a2 = float(row['A2.Seg.CN'])
+                        start = int(float(row['Start.bp']))
+                        end = int(float(row['End.bp']))
+                        cn_a1 = float(row['modal.a1'])
+                        cn_a2 = float(row['modal.a2'])
                         seg_tree[chrN].add(Interval(start, end, (self.sample_name, {'cn_a1': cn_a1, 'cn_a2': cn_a2})))
                     except ValueError:
                         continue

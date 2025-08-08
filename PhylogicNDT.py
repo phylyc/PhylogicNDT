@@ -410,6 +410,13 @@ def build_parser():
                         dest='min_supporting_muts',
                         default=3,
                         help='Minimum number of supporting mutations to time a copy number event')
+    # num ccf bins
+    timing.add_argument('--grid_size', '-g',
+                        type=int,
+                        action='store',
+                        dest='grid_size',
+                        default=101,
+                        help='num ccf bins, must match for txt input, otherwise may be any number that grid in absolute RData is divisble by.')
     timing.set_defaults(func=SinglePatientTiming.SinglePatientTiming.run_tool)
 
     single_patient_timing = subparsers.add_parser("SinglePatientTiming", help="Time somatic events in one or multiple samples.",
@@ -446,7 +453,7 @@ def build_parser():
                              type=int,
                              action='store',
                              dest='n_perms',
-                             default='500',
+                             default=500,
                              help='number of permutations')
     leaguemodel.add_argument('--n_seasons', '-n_seasons',
                              type=int,
