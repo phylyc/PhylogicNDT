@@ -14,14 +14,6 @@ import sys
 # Remove all handlers associated with the root logger object.
 for handler in logging.root.handlers[:]:
     logging.root.removeHandler(handler)
-# get current working directory
-filename = os.path.join(os.getcwd(), 'phylogicndt.log')
-print(filename)
-logging.basicConfig(filename=filename,
-                    filemode='w',
-                    format='%(asctime)s - %(levelname)s - %(message)s',
-                    datefmt='%d-%b-%y %H:%M:%S',
-                    level=getattr(logging, "INFO"))
 
 import Cluster.Cluster
 import PhylogicSim.Simulations
@@ -107,7 +99,7 @@ def build_parser():
                              help='input a random seed for reproducibility')
 
     # different Tools of the PhylogicNDT Package
-    subparsers = parser.add_subparsers(title="tool", description="Choose a tool to run", help='Try the Cluster tool')
+    subparsers = parser.add_subparsers(title="tool", description="Choose a tool to run", dest="tool", help='Try the Cluster tool')
 
     # Cluster - multidimensional clustering of mutations in CCF space
     clustering = subparsers.add_parser("Cluster",
@@ -520,6 +512,13 @@ def build_parser():
 
 
 # if __name__ == "main":
-parser = build_parser()
-args = parser
+args = build_parser()
+# get current working directory
+filename = os.path.join(os.getcwd(), f"phylogicndt.{args.tool}.log")
+print(filename)
+logging.basicConfig(filename=filename,
+                    filemode='w',
+                    format='%(asctime)s - %(levelname)s - %(message)s',
+                    datefmt='%d-%b-%y %H:%M:%S',
+                    level=getattr(logging, "INFO"))
 args.func(args)
