@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # method name
-METHOD_NAME=PhylogicNDT
+METHOD_NAME=phylogicndt
 
 # dockerhub id
 DOCKERHUB_ID=phylyc
