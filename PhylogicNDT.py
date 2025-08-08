@@ -520,5 +520,6 @@ logging.basicConfig(filename=filename,
                     filemode='w',
                     format='%(asctime)s - %(levelname)s - %(message)s',
                     datefmt='%d-%b-%y %H:%M:%S',
-                    level=getattr(logging, "INFO"))
+                    level=getattr(logging, "INFO"),
+                    force=True)
 args.func(args)
