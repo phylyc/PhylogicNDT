@@ -200,8 +200,7 @@ class ClusterEngine:
 
         for smpl_index, sample in enumerate(data.sample_list):
             for mut_index, mut in enumerate(sample.concordant_variants):
-                if mut.alt_cnt is 0 or results["clust_CCF_dens"][results["assign"][mut_index] - 1][
-                    smpl_index].argmax() / float(grid_size - 1) < 0.05:
+                if mut.alt_cnt == 0 or results["clust_CCF_dens"][results["assign"][mut_index] - 1][smpl_index].argmax() / float(grid_size - 1) < 0.05:
                     continue
                 mut.cluster_assignment = results["assign"][mut_index]
                 if mut in self.common_mutations:
