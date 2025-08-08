@@ -626,7 +626,7 @@ class Patient:
                 key = (seg[2], seg[3], seg[7])  # ('p'/'q', local_cn tuple, 'a1'/'a2')
                 buckets[key].append(seg)
 
-            # for clique in _BK_pivot(event_segs, neighbors):
+            # for clique in _BK(event_segs, neighbors):
             for key, segs in buckets.items():
                 G = build_neighbors(segs)
                 for clique in nx.find_cliques(G):

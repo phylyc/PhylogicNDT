@@ -12,19 +12,20 @@ import sys
 # sys.path.append(os.path.dirname(os.path.realpath(__file__)) + "/")
 
 # Remove all handlers associated with the root logger object.
-# for handler in logging.root.handlers[:]:
-#     logging.root.removeHandler(handler)
-# filename = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'phylogicndt.log')
-# print(filename)
-# logging.basicConfig(filename=filename,
-#                     filemode='w',
-#                     format='%(asctime)s - %(levelname)s - %(message)s',
-#                     datefmt='%d-%b-%y %H:%M:%S',
-#                     level=getattr(logging, "INFO"))
+for handler in logging.root.handlers[:]:
+    logging.root.removeHandler(handler)
+# get current working directory
+filename = os.path.join(os.getcwd(), 'phylogicndt.log')
+print(filename)
+logging.basicConfig(filename=filename,
+                    filemode='w',
+                    format='%(asctime)s - %(levelname)s - %(message)s',
+                    datefmt='%d-%b-%y %H:%M:%S',
+                    level=getattr(logging, "INFO"))
 
-import Cluster.Cluster  # Cluster Tool
+import Cluster.Cluster
 import PhylogicSim.Simulations
-import BuildTree.BuildTree  # Tree Building Tool
+import BuildTree.BuildTree
 import BuildTree.CellPopulation
 import GrowthKinetics.GrowthKinetics
 import SinglePatientTiming.SinglePatientTiming
