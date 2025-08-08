@@ -23,12 +23,13 @@ def run_tool(args):
     tree.init_tree_from_clustering(patient_data.ClusteringResults)
     tree.set_new_edges(tree_edges)
     patient_data.TopTree = tree
+    bt_engine.set_top_tree(tree)
     # Computing Cell Population
     cp_engine = CellPopulationEngine(patient_data, seed=args.seed)
     constrained_ccf = cp_engine.compute_constrained_ccf()
 
     cell_ancestry = bt_engine.get_cell_ancestry()
-    cell_abundance = cp_engine.get_cell_abundance(constrained_ccf)
+    cell_abundance = cp_engine.get_cell_abundance_across_samples(constrained_ccf)
     # Output and visualization
     import output.PhylogicOutput
     phylogicoutput = output.PhylogicOutput.PhylogicOutput()
@@ -50,7 +51,7 @@ def load_tree_edges_file(tree_tsv):
     reader = open(tree_tsv, 'r')
     header = reader.readline()
     top_tree = reader.readline()
-    return eval(top_tree.split('\t')[-1].strip())
+    return [[int(n) for n in e.split("-")] for e in top_tree.split('\t')[-1].strip().split(",") if "None" not in e]
 
 
 def parse_sif_file(sif_file, mutation_ccf_file, patient_data):
@@ -104,6 +105,6 @@ def load_clustering_results(cluster_info_file, patient_data):
     mutations = patient_data.sample_list[0].mutations
     for mutation in mutations:
         cluster_id = mutation.cluster_assignment
-        clustering_results[cluster_id].add_mutation(mutation)
+        clustering_results[cluster_id].add_mutation(mutation, mutation.ccf_1d)
 
     patient_data.ClusteringResults = clustering_results

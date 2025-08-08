@@ -93,9 +93,7 @@ class Cluster:
                 self._update_density(mutation_nd_hist, action='add')
             logging.debug("Added mutation {} to cluster {}.".format(mutation.var_str, self._identifier))
         else:
-            logging.error(
-                "Can not add mutation {} to cluster {}. It is already there.".format(mutation.var_str,
-                                                                                     self._identifier))
+            logging.error("Can not add mutation {} to cluster {}. It is already there.".format(mutation.var_str, self._identifier))
 
     def remove_mutation(self, mutation, update_cluster_hist=True):
         """ Delete mutation from cluster and updates cluster distribution """
