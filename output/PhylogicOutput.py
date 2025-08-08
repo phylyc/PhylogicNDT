@@ -269,7 +269,7 @@ class PhylogicOutput(object):
                 row = line.strip('\n\r').split('\t')
                 edges = self.reformat_edges_for_input(row[header.index('edges')])
                 edges_list.append(edges)
-                tree_iterations.append(row[header.index('n_iter')])
+                tree_iterations.append(int(row[header.index('n_iter')]))
         child_dicts = []
         for i, e in enumerate(edges_list):
             child_dicts.append({n: [] for n in itertools.chain(*e)})

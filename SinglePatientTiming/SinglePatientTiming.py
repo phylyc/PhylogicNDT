@@ -2,7 +2,7 @@ import logging
 import numpy as np
 import itertools
 from data.Patient import Patient
-import TimingEngine
+from SinglePatientTiming import TimingEngine
 from output.PhylogicOutput import PhylogicOutput
 
 

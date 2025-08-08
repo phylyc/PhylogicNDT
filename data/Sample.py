@@ -11,7 +11,7 @@ from intervaltree import Interval, IntervalTree
 
 from scipy.interpolate import interp1d
 
-from SomaticEvents import SomMutation, CopyNumberEvent
+from data.SomaticEvents import SomMutation, CopyNumberEvent
 
 from utils.calc_ccf import calc_ccf as calc_ccf_
 
@@ -111,7 +111,7 @@ class TumorSample:
     # TODO: limit ability of people to change mut from outside of the class
     @property  # dynamically set variable (if mutations are updated)
     def mut_varstr(self):
-        return [x.var_str for x in self.mutations + self.low_coverage_mutations.values()]
+        return [x.var_str for x in self.mutations + list(self.low_coverage_mutations.values())]
 
     def get_mut_by_varstr(self, variant_string):
         return self._mut_varstring_hashtable[variant_string]
@@ -271,7 +271,7 @@ class TumorSample:
 
         # if "ccf_raw_" not in file look for oldstyle headers "0", "0.01", "1"
         if len(ccf_bins_location) == 0:
-            ccf_bin_cols = ['0'] + map(str, [round(0.01 * i, 2) for i in range(1, 100)]) + ['1']
+            ccf_bin_cols = ['0'] + list(map(str, [round(0.01 * i, 2) for i in range(1, 100)])) + ['1']
             ccf_bins_location = [column_loc[1] for column_loc in h.items() if column_loc[0] in ccf_bin_cols]
 
         # another format
@@ -411,7 +411,7 @@ class TumorSample:
         if input_type == 'auto':
             if not seg_file:
                 input_type = 'none'
-            elif seg_file.endswith('.segtab.txt'):
+            elif seg_file.endswith('.txt') and "segtab" in seg_file:
                 input_type = 'absolute'
             elif seg_file.endswith('.tsv'):
                 input_type = 'alleliccapseg'

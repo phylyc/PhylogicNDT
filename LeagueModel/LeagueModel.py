@@ -1,8 +1,8 @@
-import LeagueModelData
+import LeagueModel.LeagueModelData as LeagueModelData
 
 def run_league_model(args):
     import pandas as pd
-    import cPickle as pkl
+    import pickle as pkl
     import random
     import matplotlib.pyplot as plt
     import logging
@@ -142,7 +142,7 @@ def run_league_model(args):
 
 def run_league_model_ipython_notebook(args):
     import pandas as pd
-    import cPickle as pkl
+    import pickle as pkl
     import random
     import matplotlib.pyplot as plt
     import logging

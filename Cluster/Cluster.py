@@ -14,8 +14,8 @@ def run_tool(args):
     import data.Patient as Patient
     import data.Sample as Sample
 
-    import ClusterEngine
-    import DpEngine
+    from Cluster import ClusterEngine
+    from Cluster import DpEngine
     if not os.path.isfile(args.PoN):
         logging.warning("PanelofNormals (PoN) inaccessible or not specified - not using PoN!")
         PoN = False

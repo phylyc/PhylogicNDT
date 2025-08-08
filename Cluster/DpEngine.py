@@ -326,7 +326,7 @@ class DpEngine:
         return np.apply_along_axis(lambda x: x - logsumexp(x), 1, loghist + self.logprior)
 
 
-from scipy.interpolate import interp1d
+# from scipy.interpolate import interp1d
 
 grid = np.linspace(0, 1, 101)
 

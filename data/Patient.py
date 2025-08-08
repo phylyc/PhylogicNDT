@@ -1,14 +1,16 @@
 ##########################################################
 # Patient - central class to handle and store sample CCF data
 ##########################################################
-from Sample import TumorSample
-from Sample import RNASample
-from SomaticEvents import SomMutation, CopyNumberEvent
-from Enums import CSIZE, CENT_LOOKUP
+from data.Sample import TumorSample
+from data.Sample import RNASample
+from data.SomaticEvents import SomMutation, CopyNumberEvent
+from data.Enums import CSIZE, CENT_LOOKUP
+from collections import defaultdict
 import os
 import sys
 import logging
 import itertools
+import networkx as nx
 
 import numpy as np
 from intervaltree import Interval, IntervalTree
@@ -19,7 +21,10 @@ import pkgutil
 if pkgutil.find_loader('sselogsumexp') is not None:
     from sselogsumexp import logsumexp
 else:
-    from scipy.misc import logsumexp  # LogAdd
+    try:
+        from scipy.misc import logsumexp
+    except ImportError:
+        from scipy.special import logsumexp
 
 
 class Patient:
@@ -242,7 +247,7 @@ class Patient:
                 sample.concordant_variants = []
             sample.concordant_with_samples = []
 
-            for mut in sample.mutations + sample.low_coverage_mutations.values():
+            for mut in sample.mutations + list(sample.low_coverage_mutations.values()):
 
                 # TODO: Add this as a flag
                 # if mut.mut_category is not None and ("rna" in mut.mut_category.lower() or "utr" in mut.mut_category.lower()):
@@ -580,15 +585,19 @@ class Patient:
                         event_segs.add((start, end, 'q', tuple(cns_a2), tuple(ccf_hat_a2), tuple(ccf_high_a2), tuple(ccf_low_a2), 'a2'))
                 else:
                     logging.warning('Seg with inconsistent event: {}:{}:{}'.format(chrom, seg.begin, seg.end))
-            neighbors = {s: set() for s in event_segs}
-            for seg1, seg2 in itertools.combinations(event_segs, 2):
-                s1_hat = np.array(seg1[4])
-                s2_hat = np.array(seg2[4])
-                if seg1[2] == seg2[2] and seg1[3] == seg2[3] and all(s1_hat >= np.array(seg2[6])) and all(s1_hat <= np.array(seg2[5])) \
-                        and all(s2_hat >= np.array(seg1[6])) and all(s2_hat <= np.array(seg1[5])):
-                    neighbors[seg1].add(seg2)
-                    neighbors[seg2].add(seg1)
+            # neighbors = {s: set() for s in event_segs}
+            # for seg1, seg2 in itertools.combinations(event_segs, 2):
+            #     s1_hat = np.array(seg1[4])
+            #     s2_hat = np.array(seg2[4])
+            #     if seg1[2] == seg2[2] and seg1[3] == seg2[3] and all(s1_hat >= np.array(seg2[6])) and all(s1_hat <= np.array(seg2[5])) \
+            #             and all(s2_hat >= np.array(seg1[6])) and all(s2_hat <= np.array(seg1[5])):
+            #         neighbors[seg1].add(seg2)
+            #         neighbors[seg2].add(seg1)
 
+            # Non-pivoted Bron-Kerbosch algorithm enumerating all maximal
+            # cliques in the undirected graph whose vertices are event_segs
+            # and whose edges are defined by neighbors. This has exponential
+            # time complexity. Use pivoted version instead!
             def _BK(P, neighbors, R=frozenset(), X=frozenset()):
                 if not P and not X:
                     yield R
@@ -599,29 +608,51 @@ class Patient:
                         P = P - {v}
                         X = X | {v}
 
-            for clique in _BK(event_segs, neighbors):
-                if clique:
-                    clique_len = 0
-                    clique_ccf_hat = np.zeros(n_samples)
-                    clique_ccf_high = np.zeros(n_samples)
-                    clique_ccf_low = np.zeros(n_samples)
-                    n_segs = 0
-                    for seg in clique:
-                        clique_len += seg[1] - seg[0]
-                        clique_ccf_hat += np.array(seg[4])
-                        clique_ccf_high += np.array(seg[5])
-                        clique_ccf_low += np.array(seg[6])
-                        clique_arm = seg[2]
-                        cn_category = 'Arm_gain' if all(np.array(seg[3]) > 1) else 'Arm_loss'
-                        local_cn = seg[3]
-                        n_segs += 1
-                    clique_ccf_hat /= n_segs
-                    clique_ccf_high /= n_segs
-                    clique_ccf_low /= n_segs
-                    arm_len = centromere if clique_arm == 'p' else csize - centromere
-                    if clique_len > arm_len * .5:
-                        self._add_cn_event_to_samples(chrom, 0, 0, clique_arm, local_cn, cn_category, clique_ccf_hat, clique_ccf_high,
-                                                      clique_ccf_low)
+            def build_neighbors(segs):
+                G = nx.Graph()
+                G.add_nodes_from(segs)
+                for s1, s2 in itertools.combinations(segs, 2):
+                    s1_hat = np.array(s1[4])
+                    s2_hat = np.array(s2[4])
+                    if (    all(s1_hat >= np.array(s2[6])) and all(s1_hat <= np.array(s2[5]))
+                        and all(s2_hat >= np.array(s1[6])) and all(s2_hat <= np.array(s1[5]))
+                    ):
+                        G.add_edge(s1, s2)
+                return G
+
+            # Group by arm, local_cn, and haplotype (seg[7]) if desired
+            buckets = defaultdict(list)
+            for seg in event_segs:
+                key = (seg[2], seg[3], seg[7])  # ('p'/'q', local_cn tuple, 'a1'/'a2')
+                buckets[key].append(seg)
+
+            # for clique in _BK_pivot(event_segs, neighbors):
+            for key, segs in buckets.items():
+                G = build_neighbors(segs)
+                for clique in nx.find_cliques(G):
+                    if clique:
+                        clique_arm = clique[0][2]
+                        arm_len = centromere if clique_arm == 'p' else csize - centromere
+                        clique_len = 0
+                        clique_ccf_hat = np.zeros(n_samples)
+                        clique_ccf_high = np.zeros(n_samples)
+                        clique_ccf_low = np.zeros(n_samples)
+                        n_segs = 0
+                        for seg in clique:
+                            clique_len += seg[1] - seg[0]
+                            clique_ccf_hat += np.array(seg[4])
+                            clique_ccf_high += np.array(seg[5])
+                            clique_ccf_low += np.array(seg[6])
+                            # clique_arm = seg[2]
+                            cn_category = 'Arm_gain' if all(np.array(seg[3]) > 1) else 'Arm_loss'
+                            local_cn = seg[3]
+                            n_segs += 1
+                        if clique_len < arm_len * .5:
+                            continue
+                        clique_ccf_hat /= n_segs
+                        clique_ccf_high /= n_segs
+                        clique_ccf_low /= n_segs
+                        self._add_cn_event_to_samples(chrom, 0, 0, clique_arm, local_cn, cn_category, clique_ccf_hat, clique_ccf_high, clique_ccf_low)
 
     def _add_cn_event_to_samples(self, chrom, start, end, arm, cns, cn_category, ccf_hat, ccf_high, ccf_low):
         """

@@ -69,7 +69,7 @@ def simulate_mutations(PURITY, NMUT, ccf, mutations):
 
 
 def pre_compute_WCC(sample):
-    print "pre-computing WCC"
+    print("pre-computing WCC")
     corr_y = []
 
     for obs_cluster_pos in list(np.logspace(0, 1, 25) / 10. - 0.1) + [1.]:
@@ -82,12 +82,12 @@ def pre_compute_WCC(sample):
                  in range(5)])
             err = obs_cluster_pos - sim_res  # distance between observed cluster position, and the observed simulated cluster position.
             cluster_pos += err / 2.
-            print cluster_pos,
-        print "."
+            print(cluster_pos)
+        print(".")
         corr_y.append(max(cluster_pos, 0))
 
     from scipy.interpolate import interp1d
 
-    print "done pre-computing WCC!"
+    print("done pre-computing WCC!")
 
     return interp1d(list(np.logspace(0, 1, 25) / 10. - 0.1) + [1.], corr_y)

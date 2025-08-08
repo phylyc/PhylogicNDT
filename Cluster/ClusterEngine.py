@@ -8,7 +8,7 @@ import logging
 import numpy as np
 
 # modules from this PhylogicNDT package
-from .DpEngine import DpEngine
+from Cluster.DpEngine import DpEngine
 
 
 class ClusterEngine:
@@ -96,7 +96,7 @@ class ClusterEngine:
             mut_row = []
             if 'WGD' in mut.var_str:
                        for sample in data.sample_list:
-                            print sample.WGD_status
+                            print(sample.WGD_status)
                        for sample in data.sample_list:
                             mut_row.append(sample.get_mut_by_varstr(mut.var_str))
             if len(mut_row) < len(data.sample_names):

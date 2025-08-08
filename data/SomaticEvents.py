@@ -1,6 +1,6 @@
 import os
 import sys
-import Enums
+import data.Enums as Enums
 import logging
 from intervaltree import IntervalTree
 

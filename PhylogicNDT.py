@@ -9,18 +9,18 @@ import logging
 import os
 import sys
 
-sys.path.append(os.path.dirname(os.path.realpath(__file__)) + "/")
+# sys.path.append(os.path.dirname(os.path.realpath(__file__)) + "/")
 
 # Remove all handlers associated with the root logger object.
-for handler in logging.root.handlers[:]:
-    logging.root.removeHandler(handler)
-filename = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'phylogicndt.log')
-print(filename)
-logging.basicConfig(filename=filename,
-                    filemode='w',
-                    format='%(asctime)s - %(levelname)s - %(message)s',
-                    datefmt='%d-%b-%y %H:%M:%S',
-                    level=getattr(logging, "INFO"))
+# for handler in logging.root.handlers[:]:
+#     logging.root.removeHandler(handler)
+# filename = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'phylogicndt.log')
+# print(filename)
+# logging.basicConfig(filename=filename,
+#                     filemode='w',
+#                     format='%(asctime)s - %(levelname)s - %(message)s',
+#                     datefmt='%d-%b-%y %H:%M:%S',
+#                     level=getattr(logging, "INFO"))
 
 import Cluster.Cluster  # Cluster Tool
 import PhylogicSim.Simulations
@@ -505,7 +505,9 @@ def build_parser():
     leaguemodel.set_defaults(func=LeagueModel.LeagueModel.run_league_model)
 
     # print help without -h
-    if len(sys.argv) < 2: parser.print_help(sys.stderr)
+    if len(sys.argv) < 2:
+        parser.print_help(sys.stderr)
+
     return parser.parse_args()
 
 
