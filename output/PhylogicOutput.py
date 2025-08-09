@@ -1127,13 +1127,33 @@ class PhylogicOutput(object):
         for clust, rate in growth_rates.items():
             if sum(rate) == 0: 
                 continue
-            sns.distplot(np.array(rate), bins=35,
-                            label=str(clust) + " - %1.2f" % (sum(np.array(rate) < 0) / float(len(rate))),
-                            color=ClusterColors.get_hex_string(clust))            
+            color = ClusterColors.get_hex_string(clust)
+            arr = np.array(rate)
+            sns.histplot(
+                arr,
+                bins=35,
+                stat="density",
+                edgecolor=None,
+                alpha=0.5,
+                color=color
+            )
+            sns.kdeplot(
+                arr,
+                color=color,
+                cut=3,  # extends curve ~3 bandwidths beyond min/max
+                lw=1.5
+            )
+            # sns.distplot(np.array(rate), bins=35,
+            #                 label=str(clust) + " - %1.2f" % (sum(np.array(rate) < 0) / float(len(rate))),
+            #                 color=ClusterColors.get_hex_string(clust))
         plt.title("Clusters growth rate")
         plt.xlabel("growth rate")
         plt.ylabel("Probability Density")
-        plt.legend()
+        plt.legend(
+            [f"{clust} - {sum(np.array(rate) < 0) / float(len(rate)):.2f}"
+             for clust, rate in growth_rates.items() if sum(rate) != 0]
+        )
+        sns.despine()
         plt.savefig(indiv + ".growth_rate.pdf")
 
     def write_timing_tsv(self, timing_engine):
