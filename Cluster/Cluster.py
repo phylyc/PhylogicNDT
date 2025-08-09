@@ -48,7 +48,6 @@ def run_tool(args):
             seg_fn = smpl_spec[2]
             purity = float(smpl_spec[3])
             timepoint = float(smpl_spec[4])
-            print(timepoint)
             patient_data.addSample(maf_fn, sample_id, timepoint_value=timepoint, grid_size=args.grid_size,
                                    _additional_muts=None, seg_file=seg_fn,
                                    purity=purity, input_type=args.maf_input_type)
