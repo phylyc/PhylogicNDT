@@ -60,6 +60,7 @@ class TumorSample:
                  seg_file=None,
                  purity=None,
                  timepoint_value=None,
+                 tmb=None,
                  seg_input_type='auto'):
 
         # Reference to Patient object
@@ -69,6 +70,7 @@ class TumorSample:
         self.DNAsource = DNAsource
         self.ccf_grid_size = ccf_grid_size
         self.timepoint = timepoint_value
+        self.tmb = tmb
         # a dictionary hash table for fast var_str lookup
         self._mut_varstring_hashtable = {}
         self.private_mutations = []
@@ -207,7 +209,6 @@ class TumorSample:
             return None
 
     def _read_post_clustering_results(self, filen):
-        from scipy.special import logsumexp as logsumexp_scipy
         mutation_list = []
         ccf_headers = ['preDP_ccf_' + str(i / 100.0) for i in range(0, 101, 1)]
         with open(filen, 'r') as reader:
@@ -535,6 +536,7 @@ class TumorSample:
 
         return seg_tree
 
+    @staticmethod
     def get_cel_prev(mult, allele_cn, allele_ccf, other_cn, other_cn_ccf, alt, ref, PURITY, ncn):
         # PURITY  purity of sample
         # now given all of above model the CCF distributions

@@ -20,24 +20,30 @@ class GrowthKineticsEngine:
         return self._wbc
 
     def estimate_growth_rate(self, mcmc_trace_cell_abundance, times=None, n_iter=100, conv=1e-40):
-        '''
-        
-        '''
         # Number of samples for this Patient
-        sample_list = list(mcmc_trace_cell_abundance.keys())
-        time_points = len(sample_list)
-        n_clusters = len(list(mcmc_trace_cell_abundance[sample_list[0]]))
-        #cluster_rates = defaultdict(list)
+        sample_list = self._patient.sample_names
+        time_points = [s.timepoint for s in self._patient.sample_list]
+        wbc = [s.tmb for s in self._patient.sample_list]
+
+        if not sample_list:
+            sample_list = list(mcmc_trace_cell_abundance.keys())
+
         # If times of samples are not provided, treat as an integers
-        if not times:
-            times = np.array(range(time_points)) + 1
+        if not time_points:
+            time_points = times if times is not None else (np.arange(len(sample_list)) + 1)
+
+        if not wbc:
+            wbc = self._wbc if len(self._wbc) else [1] * len(sample_list)
+
+        n_clusters = len(mcmc_trace_cell_abundance[sample_list[0]])
+
         for n in range(n_iter):
-            adj_wbc = self._wbc * (1 + np.array([(np.random.random() - 0.5) / 100. for x in range(len(self._wbc))]))
+            adj_wbc = wbc * (1 + (np.random.random(size=len(wbc)) - 0.5) / 100.)
             for cluster_id in range(1, n_clusters + 1):
                 cluster_abundances = []
-                for sample_name, sample_abundances in mcmc_trace_cell_abundance.items():
+                for _, sample_abundances in mcmc_trace_cell_abundance.items():
                     cluster_abundances.append(sample_abundances[cluster_id][n] + conv)
-                cluster_slope = linregress(times, cluster_abundances * adj_wbc).slope
+                cluster_slope = linregress(time_points, cluster_abundances * adj_wbc).slope
                 self._growth_rates[cluster_id].append(cluster_slope)
 
     def line_fit(self, x, c_idx, fb_x_vals, len_pre_tp, adj_dens):
