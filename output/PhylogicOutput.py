@@ -1257,69 +1257,78 @@ class PhylogicOutput(object):
         ax.set_xlim(xmean - xwidth * 1.2, xmean + xwidth * 1.2)
         ax.set_ylim(ymean - ywidth * 1.2, ymean + ywidth * 1.2)
         ax.set_title(indiv_id + ' timing graph')
-        plt.savefig(indiv_id + '.comp_graph.png')
+        plt.savefig(indiv_id + '.comp_graph.pdf')
         return nodes, edges, pos
 
     @staticmethod
     def _get_timing_graph(comps, coincidence_thresh=.8, edge_thresh=.5, eves_per_row=2):
         """
-        Get nodes and edges from a comparison table
-        Args:
-            comps: comparison table
-            coincidence_thresh: probability threshold above which to merge events into a single node
-            edge_thresh: probability threshold above which to create a directed edge
-            eves_per_row: number of events per row in the label
-
-        Returns:
-        networkx DiGraph object
+        comps: dict[(event_i, event_j)] -> (p_i_before_j, p_j_before_i, p_coincident)
+               Must contain both directions either as (i,j) or (j,i). Order-agnostic lookup is handled below.
         """
-        all_events = set(itertools.chain(*comps))
-        neighbors = {eve: set() for eve in all_events}
-        for (eve1, eve2), (p1_2, p2_1, p_unknown) in comps.items():
-            if p_unknown > coincidence_thresh:
-                neighbors[eve1].add(eve2)
-                neighbors[eve2].add(eve1)
+        # --- 1) Build the undirected "coincidence" graph
+        all_events = set(itertools.chain.from_iterable(comps.keys()))
+        Gc = nx.Graph()
+        Gc.add_nodes_from(all_events)
 
-        def _BK(P, neighbors, R=frozenset(), X=frozenset()):
-            if not P and not X:
-                yield R
-            else:
-                for v in P:
-                    for r in _BK(P & neighbors[v], neighbors, R=R | {v}, X=X & neighbors[v]):
-                        yield r
-                    P = P - {v}
-                    X = X | {v}
+        for (e1, e2), (p1_2, p2_1, p_coinc) in comps.items():
+            if p_coinc > coincidence_thresh:
+                Gc.add_edge(e1, e2)
 
-        nodes = list(_BK(all_events, neighbors))
-        DG = nx.DiGraph()
-        labels = []
-        for node in nodes:
-            label = ''
-            for i, eve in enumerate(node):
+        # Ensure isolated events (no coincident partners) appear as 1-clique nodes
+        # (find_cliques already returns singletons for isolated nodes)
+        cliques = list(nx.find_cliques(Gc))  # each is a list of event names
+
+        # --- 2) Create labeled nodes for the DiGraph (one node per clique)
+        def label_for_clique(events):
+            # stable order for reproducibility
+            ev = sorted(events)
+            chunks = []
+            for i, e in enumerate(ev):
                 if i == 0:
-                    label += eve
+                    chunks.append(e)
                 elif i % eves_per_row == 0:
-                    label += '\n' + eve
+                    chunks.append("\n" + e)
                 else:
-                    label += ', ' + eve
-            labels.append(label)
-            DG.add_node(label)
-        for i1, i2 in itertools.combinations(range(len(nodes)), 2):
-            label1 = labels[i1]
-            eve1 = next(iter(nodes[i1]))
-            label2 = labels[i2]
-            eve2 = next(iter(nodes[i2]))
-            if (eve1, eve2) in comps:
-                p1_2, p2_1, p_unknown = comps[(eve1, eve2)]
+                    chunks.append(", " + e)
+            return "".join(chunks)
+
+        labels = [label_for_clique(C) for C in cliques]
+
+        DG = nx.DiGraph()
+        DG.add_nodes_from(labels)
+
+        # Representative event per clique (for compatibility with original code)
+        # NOTE: This mimics the original "pick one event" behavior deterministically.
+        rep = [sorted(C)[0] for C in cliques]
+
+        # Helper: symmetric lookup into comps for any unordered pair
+        def get_pair_probs(a, b):
+            if (a, b) in comps:
+                return comps[(a, b)]  # (p_a->b, p_b->a, p_coinc)
+            elif (b, a) in comps:
+                p_ba, p_ab, p_co = comps[(b, a)]
+                return (p_ab, p_ba, p_co)
             else:
-                p2_1, p1_2, p_unknown = comps[(eve2, eve1)]
+                return None
+
+        # --- 3) Add directed edges between clique-nodes using reps (preserves original semantics)
+        for i, j in itertools.combinations(range(len(cliques)), 2):
+            r1, r2 = rep[i], rep[j]
+            probs = get_pair_probs(r1, r2)
+            if probs is None:
+                continue
+            p1_2, p2_1, p_coinc = probs
             if p1_2 > edge_thresh:
-                DG.add_edge(label1, label2)
+                DG.add_edge(labels[i], labels[j])
             elif p2_1 > edge_thresh:
-                DG.add_edge(label2, label1)
-        for edge in list(DG.edges()):
-            if len(list(nx.all_simple_paths(DG, *edge))) > 1:
-                DG.remove_edge(*edge)
+                DG.add_edge(labels[j], labels[i])
+
+        # --- 4) Remove transitive edges (if acyclic)
+        if nx.is_directed_acyclic_graph(DG):
+            DG = nx.algorithms.dag.transitive_reduction(DG)
+        # else: keep edges as-is; TR is only defined for DAGs
+
         return DG
 
     @staticmethod
