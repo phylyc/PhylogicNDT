@@ -119,7 +119,7 @@ class PhylogicOutput(object):
                                treatment_data=treatment_data)
 
     def generate_html_from_tree(self, mutation_ccf_file, cluster_ccf_file, tree, abundances, sif=None, drivers=(),
-                                treatment_file=None, tumor_sizes_file=None, cnv_file=None):
+                                treatment_file=None, tumor_sizes_file=None, cnv_file=None, cluster_color_order=None):
         """
         Creates html report from Clustering and BuildTree output files
         Args:
@@ -134,6 +134,27 @@ class PhylogicOutput(object):
             cnv_file: path to cnvs file
 
         """
+        # Alter cluster colors
+        if cluster_color_order:
+            cluster_color_order = cluster_color_order.split(',')
+            default_color_list = ClusterColors.get_default_color_list()
+            needed_clusters = {int(clus): col for clus, col in
+                               zip(cluster_color_order, default_color_list[1:len(cluster_color_order)+1])}
+            remain_clusters = default_color_list[len(cluster_color_order)+1:]
+            i = 1
+            final_colors = [default_color_list[0]]  # add cluster "0" pink color
+            while needed_clusters:
+                if i in needed_clusters.keys():
+                    final_colors.append(needed_clusters.pop(i))
+                else:
+                    try:
+                        final_colors.append(remain_clusters.pop(0))
+                    except IndexError:
+                        continue
+                i += 1
+            final_colors.extend(remain_clusters)
+            ClusterColors.color_list = final_colors
+
         sample_names = []
         treatment_data = None
         if sif:

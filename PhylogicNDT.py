@@ -98,6 +98,27 @@ def build_parser():
                              default=None,
                              help='input a random seed for reproducibility')
 
+    base_parser.add_argument('--cluster_ccf_trace',
+                                dest='cluster_ccf_trace',
+                                action='store_true',
+                                help='Save MCMC trace for constrained CCF values (in addition to cell abundance trace)')
+    base_parser.add_argument('--cluster_order',
+                                dest='cluster_order',
+                                action='store',
+                                type=str,
+                                help='Specify order of clusters to change cluster colors (i.e. to match other tree). Give as comma-separated string.')
+    base_parser.add_argument('--tree_number',
+                                dest='tree_number',
+                                action='store',
+                                type=int,
+                                help='Specify which tree to select from the ranked build_tree_posteriors (1-indexed); default is 1 (most likely tree).',
+                                default=1)
+    base_parser.add_argument('--select_tree',
+                                dest='select_tree',
+                                action='store_true',
+                                default=False,
+                                help='Interactively select a tree.')
+
     # different Tools of the PhylogicNDT Package
     subparsers = parser.add_subparsers(title="tool", description="Choose a tool to run", dest="tool", help='Try the Cluster tool')
 
