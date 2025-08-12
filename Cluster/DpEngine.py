@@ -578,57 +578,64 @@ def sample_gamma_cond_N_k(N, k, eta, Pi_gamma):
 
 
 def get_gamma_prior_from_k_prior(N, k_0_map, k_prior):
-    def LL(Par, N, int_k_prior):
+    """
+    k_0_map: array with two cols; pdf is evaluated at x = k_0_map[:,1].
+             The factor appended(1, 1/diff(k_0_map[:,0])) is treated as
+             a Jacobian/spacing weight.
+    """
+    k_0_map = np.asarray(k_0_map, float)
+    grid = k_0_map[:, 0]
+    x = k_0_map[:, 1]
 
-        if (any(Par < 0)): return np.inf
+    w = np.empty_like(grid)
+    w[0] = 1.0
+    w[1:] = 1.0 / np.diff(grid)
+    logw = np.log(w)
 
-        mu = Par[0]
-        sigma = Par[1]
-        B = mu / float(sigma ** 2)
-        A = B * mu
+    # target prior P on the same grid (normalize once)
+    P = np.interp(grid, np.arange(1, N + 1), np.asarray(k_prior, float))
+    P = P / P.sum()
+    posP = P > 0
+    logP = np.full_like(P, -np.inf, dtype=float)
+    logP[posP] = np.log(P[posP])
 
-        k_prob = stats.gamma.pdf(k_0_map[:, 1], A, scale=1.0 / B)
-        k_prob = k_prob * np.append(1, 1. / np.diff(k_0_map[:, 0]))
-        k_prob = k_prob / float(np.sum(k_prob))
+    def LL(theta):
+        # theta = [mu, sigma]  (mean, std of the Gamma)
+        mu, sigma = theta
+        if not np.isfinite(mu) or not np.isfinite(sigma) or mu <= 0 or sigma <= 0:
+            return np.inf
 
-        ix = np.logical_and(k_prob > 0, int_k_prior > 0)
-        t1 = sum((np.log(k_prob) * k_prob)[ix])
-        t2 = sum((np.log(int_k_prior) * k_prob)[ix])
-        divergence = (t1 - t2) / float(len(int_k_prior))
+        # Gamma parameterization: shape A=(mu/sigma)^2, rate B=mu/sigma^2
+        B = mu / (sigma**2)
+        A = mu * B
 
-        return divergence
+        # log unnormalized Q_i ∝ log pdf(x_i) + log w_i
+        logq_unnorm = stats.gamma.logpdf(x, A, scale=1.0/B) + logw
+        logZ = logsumexp(logq_unnorm)
+        logQ = logq_unnorm - logZ
+        Q = np.exp(logQ)  # needed as weights in the expectation
 
-    sigma_grid = range(1, 25, 5)
-    mu_grid = range(1, 25, 5)
-    obj = np.ones([len(sigma_grid), len(mu_grid)]) * np.nan
-    mode_vals = np.ones([len(sigma_grid) * len(mu_grid), 3]) * np.nan
+        # Only positions where P_i > 0 contribute
+        m = posP
+        t1 = np.sum(Q[m] * logQ[m])
+        t2 = np.sum(Q[m] * logP[m])
+        return (t1 - t2) / P.size
 
-    int_k_prior = np.interp(k_0_map[:, 0], range(1, N + 1), k_prior)
-    int_k_prior = int_k_prior / float(np.sum(int_k_prior))
+    # coarse grid + local refine
+    sigma_grid = np.arange(1.0, 25.0, 5.0)
+    mu_grid = np.arange(1.0, 25.0, 5.0)
 
-    for i in range(len(sigma_grid)):
-        for j in range(len(mu_grid)):
-            par0 = [sigma_grid[i], mu_grid[j]]
-            res = minimize(lambda x: LL(x, N, int_k_prior), par0, method="Nelder-Mead")
+    best_fun, best_x = np.inf, None
+    for s0 in sigma_grid:
+        for m0 in mu_grid:
+            res = minimize(LL, x0=[m0, s0], method="Nelder-Mead")
+            if res.fun < best_fun:
+                best_fun, best_x = res.fun, res.x
 
-            val = res.x
-            obj[i, j] = LL(val, N, int_k_prior)
-            mode_vals[(i - 2) * len(mu_grid) + j, :] = np.append(val, obj[i, j])
-            print
-            '.',
-
-    logging.info("")
-
-    ix = np.argmin(mode_vals[:, 2])
-    mu = mode_vals[ix, 0]
-    sigma = mode_vals[ix, 1]
-    KL_divergence = mode_vals[ix, 2]
-
-    B = mu / float(sigma ** 2)
-    A = B * mu
-    val = {"a": A, "b": B, "KL_divergence": KL_divergence}
-
-    return (val)
+    mu, sigma = best_x
+    B = mu / (sigma**2)
+    A = mu * B
+    return {"a": A, "b": B, "KL_divergence": best_fun}
 
 
 def summarize_mut_locations(DP_res, N_burn):
