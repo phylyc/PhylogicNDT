@@ -23,7 +23,7 @@ def run_tool(args):
                 seg_fn = row['seg_fn']
                 purity = float(row['purity'])
                 timepoint = float(row['timepoint'])
-                patient_data.addSample(maf_fn, sample_id, input_type='post-clustering', seg_input_type='timing_format',
+                patient_data.addSample(maf_fn, sample_id, input_type='post-clustering', #seg_input_type='timing_format',
                                        timepoint_value=timepoint, grid_size=101, _additional_muts=None, seg_file=seg_fn,
                                        purity=purity)
 
@@ -45,6 +45,7 @@ def run_tool(args):
                                    _additional_muts=None, seg_file=seg_fn, purity=purity)
 
     patient_data.preprocess_samples()
+    patient_data.get_arm_level_cn_events()
     if args.min_supporting_muts < 1:
         raise ValueError('Invalid value for min_supporting_muts')
     timing_engine = TimingEngine.TimingEngine(patient_data, min_supporting_muts=args.min_supporting_muts)
@@ -55,7 +56,7 @@ def run_tool(args):
         driver_genes = [line.strip() for line in f]
     comps = compare_events(timing_engine, drivers=driver_genes)
     phylogicoutput.write_comp_table(args.indiv_id, comps)
-    # phylogicoutput.generate_html_from_timing(args.indiv_id, timing_engine, comps, drivers=driver_genes)
+    phylogicoutput.generate_html_from_timing(args.indiv_id, timing_engine, comps, drivers=driver_genes)
 
 
 def compare_events(timing_engine, drivers=()):

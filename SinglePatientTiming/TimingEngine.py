@@ -52,7 +52,7 @@ class TimingEngine(object):
             region = chrN + arm
             states_across_samples = {}  # hold union of all copy number states in all samples
             for sample in self.sample_list:
-                if region in sample.cn_states:
+                if region in sample.cn_states and len(sample.cn_states[region].cn_events):
                     # Coerce copy number states to integer states
                     if 0. <= sample.cn_states[region].cn_a1 < 1.:
                         cn_a1 = 0.
@@ -274,7 +274,7 @@ class TimingSample(object):
         else:
             self.concordant_mutation_intervaltree = {chrom: IntervalTree() for chrom in self._chromosomes}
         for mut in itertools.chain(self.sample.mutations, self.sample.low_coverage_mutations.values()):
-            if mut.chrN in self.mutation_intervaltree and (concordant_muts is None or mut.var_str in concordant_muts):
+            if mut.chrN in self.mutation_intervaltree and (concordant_muts is None or mut.var_str in concordant_muts) and mut.type != "CNV":
                 segs = self.CnProfile[mut.chrN][mut.pos]
                 if segs:
                     cn_seg = next(iter(segs))
