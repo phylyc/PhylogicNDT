@@ -14,6 +14,7 @@ import random
 import math
 import re
 import networkx as nx
+import logging
 
 import matplotlib
 
@@ -118,7 +119,7 @@ class PhylogicOutput(object):
                                treatment_data=treatment_data)
 
     def generate_html_from_tree(self, mutation_ccf_file, cluster_ccf_file, tree, abundances, sif=None, drivers=(),
-                                treatment_file=None, tumor_sizes_file=None, cnv_file=None):
+                                treatment_file=None, tumor_sizes_file=None, cnv_file=None, cluster_color_order=None):
         """
         Creates html report from Clustering and BuildTree output files
         Args:
@@ -133,6 +134,27 @@ class PhylogicOutput(object):
             cnv_file: path to cnvs file
 
         """
+        # Alter cluster colors
+        if cluster_color_order:
+            cluster_color_order = cluster_color_order.split(',')
+            default_color_list = ClusterColors.get_default_color_list()
+            needed_clusters = {int(clus): col for clus, col in
+                               zip(cluster_color_order, default_color_list[1:len(cluster_color_order)+1])}
+            remain_clusters = default_color_list[len(cluster_color_order)+1:]
+            i = 1
+            final_colors = [default_color_list[0]]  # add cluster "0" pink color
+            while needed_clusters:
+                if i in needed_clusters.keys():
+                    final_colors.append(needed_clusters.pop(i))
+                else:
+                    try:
+                        final_colors.append(remain_clusters.pop(0))
+                    except IndexError:
+                        continue
+                i += 1
+            final_colors.extend(remain_clusters)
+            ClusterColors.color_list = final_colors
+
         sample_names = []
         treatment_data = None
         if sif:
@@ -143,6 +165,7 @@ class PhylogicOutput(object):
                     fields = dict(zip(header, line.strip('\n\r').split('\t')))
                     sample_names.append(fields['sample_id'])
                     timepoints.append(float(fields['timepoint']) if fields['timepoint'] else np.nan)
+
             if np.all(~np.isnan(timepoints)) and len(set(timepoints)) == len(sample_names):
                 sorting_idx = sorted(range(len(sample_names)), key=lambda k: timepoints[k])
                 sample_names = [sample_names[i] for i in sorting_idx]
@@ -170,6 +193,9 @@ class PhylogicOutput(object):
             tumor_sizes = [[t, 1.] for t in timepoints]
         aliases = ['T' + str(i) for i, s in enumerate(sample_names)]
 
+        sample_index = {s: i for i, s in enumerate(sample_names)}
+        S = len(sample_names)
+
         cluster_dict = {}
         cluster_ccfs = {}
         patient = ''
@@ -185,18 +211,32 @@ class PhylogicOutput(object):
                 ccf_hat = float(fields['postDP_ccf_mean'])
                 ccf_high = float(fields['postDP_ccf_CI_high'])
                 ccf_low = float(fields['postDP_ccf_CI_low'])
-                cluster_dict.setdefault(c, {'ccf_hat': [], 'ccf_high': [], 'ccf_low': [], 'muts': {}, 'cnvs': {},
-                                            'drivers': [], 'tumor_abundance': []})
-                cluster_dict[c]['ccf_hat'].append(ccf_hat)
-                cluster_dict[c]['ccf_high'].append(ccf_high)
-                cluster_dict[c]['ccf_low'].append(ccf_low)
-                if sample not in sample_names:
-                    sample_names.append(sample)
+
+                cluster_dict.setdefault(c, {'ccf_hat': [0] * S, 'ccf_high': [0] * S, 'ccf_low': [0] * S,
+                                            'muts': {}, 'cnvs': {}, 'drivers': [], 'tumor_abundance': []})
+
+                if sample not in sample_index:
+                    # keep SIF order authoritative; you can warn instead of appending
+                    logging.warning(f"Sample {sample} in cluster_ccf_file not found in SIF; skipping.")
+                else:
+                    j = sample_index[sample]
+                    cluster_dict[c]['ccf_hat'][j] = ccf_hat
+                    cluster_dict[c]['ccf_high'][j] = ccf_high
+                    cluster_dict[c]['ccf_low'][j] = ccf_low
+
                 ccf_dist = [float(fields[k]) for k in ccf_dist_keys]
                 cluster_ccfs.setdefault(sample, {})
                 cluster_ccfs[sample][c] = np.array(ccf_dist)
-                if len(sample_names) == 1:
+
+                if S == 1:
                     cluster_dict[c]['ccf_dist'] = ccf_dist
+
+        for c, d in cluster_dict.items():
+            for key in ('ccf_hat', 'ccf_high', 'ccf_low'):
+                if any(v is None for v in d[key]):
+                    missing = [sample_names[i] for i, v in enumerate(d[key]) if v is None]
+                    logging.warning(f"Cluster {c}: missing {key} for samples {missing}")
+
         n_muts = dict.fromkeys(cluster_dict, 0)
         ccf_dist_keys = ['preDP_ccf_'+str(i / 100.) for i in range(101)]
         with open(mutation_ccf_file, 'r') as mut_file:
@@ -222,23 +262,32 @@ class PhylogicOutput(object):
                     mut_name = ':'.join((hugo, pos, ref, alt))
                 else:
                     mut_name = ':'.join((chrom, pos, ref, alt))
-                cluster_dict[c]['muts'].setdefault(mut_name, {'ccf_hat': [], 'alt_cnt': [], 'ref_cnt': []})
-                cluster_dict[c]['muts'][mut_name]['ccf_hat'].append(ccf_hat)
-                cluster_dict[c]['muts'][mut_name]['alt_cnt'].append(alt_cnt)
-                cluster_dict[c]['muts'][mut_name]['ref_cnt'].append(ref_cnt)
-                cluster_dict[c]['muts'][mut_name]['chrom'] = chrom
-                cluster_dict[c]['muts'][mut_name]['pos'] = pos
-                if len(sample_names) == 1:
-                    cluster_dict[c]['muts'][mut_name]['ccf_dist'] = [float(fields[k]) for k in ccf_dist_keys]
+
+                d = cluster_dict[c]['muts'].setdefault(mut_name, {
+                    'ccf_hat': [0] * S, 'alt_cnt': [0] * S, 'ref_cnt': [0] * S,
+                    'chrom': chrom, 'pos': pos
+                })
+
+                if sample not in sample_index:
+                    logging.warning(f"Sample {sample} in mutation_ccf_file not found in SIF; skipping {mut_name}.")
+                else:
+                    j = sample_index[sample]
+                    d['ccf_hat'][j] = ccf_hat
+                    d['alt_cnt'][j] = alt_cnt
+                    d['ref_cnt'][j] = ref_cnt
+
+                # single-sample density (unchanged)
+                if S == 1:
+                    d['ccf_dist'] = [float(fields[k]) for k in ccf_dist_keys]
+
+                # driver counting: compare against the true earliest sample (sample_names[0])
                 if sample == sample_names[0]:
                     n_muts[c] += 1
-                    if hugo in drivers:
-                        if "." in mut_name: #Non-coding mutations don't have this
-                            mut_name_prot_change = mut_name.split(".")[1]
-                            old_aa = mut_name_prot_change[0] #Previous amino acid
-                            new_aa = mut_name_prot_change[-1] #New amino acid
-                            if new_aa != old_aa: #If mutation is non-silent, only then add it to 'drivers'
-                                cluster_dict[c]['drivers'].append(mut_name)
+                    if hugo in drivers and "." in mut_name:
+                        pc = mut_name.split(".")[1]
+                        if pc[0] != pc[-1]:
+                            cluster_dict[c]['drivers'].append(mut_name)
+
         if cnv_file:
             unique_cnvs = {s: set() for s in sample_names}
             with open(cnv_file, 'r') as cnvs:
@@ -246,20 +295,37 @@ class PhylogicOutput(object):
                 for line in cnvs:
                     fields = dict(zip(header, line.strip('\n\r').split('\t')))
                     sample = fields['Sample_ID']
+                    if sample not in sample_index:
+                        logging.warning(f"CNV sample {sample} not in SIF; skipping row.")
+                        continue
+                    j = sample_index[sample]
+
                     mut_name = fields['Event_Name']
-                    if mut_name in unique_cnvs[sample]:
-                        mut_name += '_'
+                    while mut_name in unique_cnvs[sample]:
+                        mut_name += '_'  # disambiguate duplicates within the same sample
                     unique_cnvs[sample].add(mut_name)
                     ccf_hat = float(fields['preDP_ccf_mean'])
                     c = int(fields['Cluster_Assignment'])
                     chrom = fields['Chromosome']
-                    cluster_dict[c]['cnvs'].setdefault(mut_name, {'ccf_hat': []})
-                    cluster_dict[c]['cnvs'][mut_name]['ccf_hat'].append(ccf_hat)
-                    cluster_dict[c]['cnvs'][mut_name]['chrom'] = chrom
-                    cluster_dict[c]['cnvs'][mut_name]['pos'] = ''
+
+                    # ensure cluster exists and create CNV entry with fixed length lists
+                    cluster_dict.setdefault(c, {'ccf_hat': [0] * S, 'ccf_high': [0] * S, 'ccf_low': [0] * S,
+                                                'muts': {}, 'cnvs': {}, 'drivers': [], 'tumor_abundance': []})
+                    cnv_entry = cluster_dict[c]['cnvs'].setdefault(
+                        mut_name, {'ccf_hat': [None] * S, 'chrom': chrom, 'pos': ''}
+                    )
+                    # fill the correct position for this sample
+                    cnv_entry['ccf_hat'][j] = ccf_hat
+                    # keep chrom/pos stable (only set if empty)
+                    if not cnv_entry.get('chrom'):
+                        cnv_entry['chrom'] = chrom
+                    if 'pos' not in cnv_entry:
+                        cnv_entry['pos'] = ''
+
         for c in cluster_dict:
             cluster_dict[c]['line_width'] = min(12, math.ceil(3 * n_muts[c] / 7.))
             cluster_dict[c]['color'] = ClusterColors.get_rgb_string(c)
+
         edges_list = []
         tree_iterations = []
         # Removed eval when reading file
@@ -283,6 +349,7 @@ class PhylogicOutput(object):
                 tree.add_node(identifier)
         tree.add_edges(edges)
         tree.set_root(tree.get_node_by_id(1))
+
         constrained_ccfs = {c: {} for c in tree.nodes.keys() if c}
         cell_abundances = {s: {} for s in sample_names}
         with open(abundances, 'r') as abun_fh:
@@ -296,6 +363,7 @@ class PhylogicOutput(object):
                 constrained_ccfs[c][sample_name] = (cell_abundance / 100.)
         for c in constrained_ccfs:
             cluster_dict[c]['tumor_abundance'] = [constrained_ccfs[c][s] for s in sample_names]
+
         pie_plot_dir = '{}_pie_plots'.format(patient)
         if not os.path.exists(pie_plot_dir):
             os.mkdir(pie_plot_dir)
@@ -1058,14 +1126,18 @@ class PhylogicOutput(object):
         df.to_csv(output_file, sep='\t', index=False)
 
     @staticmethod
-    def write_all_cell_abundances(all_cell_abundances, indiv_id):
-        header = ['Patient_ID', 'Sample_ID', 'Iteration', 'Cluster_ID', 'Abundance']
-        with open(indiv_id + '_cell_population_mcmc_trace.tsv', 'w') as writer:
+    def write_all_cell_abundances(all_cell_abundances, indiv_id, fn='_cell_population_mcmc_trace.tsv', head='Abundance'):
+        header = ['Patient_ID', 'Sample_ID', 'Iteration', 'Cluster_ID', head]
+        with open(indiv_id + fn, 'w') as writer:
             writer.write('\t'.join(header) + '\n')
             for sample_id, sample_mcmc_trace in all_cell_abundances.items():
                 for iteration, abundances in enumerate(sample_mcmc_trace):
                     for cluster, amount in abundances.items():
                         writer.write('\t'.join([indiv_id, sample_id, str(iteration), str(cluster), str(amount)]) + '\n')
+
+    @staticmethod
+    def write_cluster_ccf_trace_tsv(all_cell_ccfs, indiv_id):
+        PhylogicOutput.write_all_cell_abundances(all_cell_ccfs, indiv_id, fn='_cluster_ccf_mcmc_trace.tsv', head='CCF')
 
     @staticmethod
     def write_mcmc_constrained_densitites(mcmc_trace_constrained_densitites, indiv_id):
@@ -1432,6 +1504,7 @@ class PhylogicOutput(object):
 class ClusterColors(object):
     # Cluster colors
     color_list = [[166, 17, 129],
+                 # [211, 211, 211],  # todo remove - Gray is for unrelated clonal only
                   [39, 140, 24],
                   [103, 200, 243],
                   [248, 139, 16],
@@ -1497,6 +1570,68 @@ class ClusterColors(object):
     @classmethod
     def get_hex_string(cls, c):
         return '#{:02X}{:02X}{:02X}'.format(*cls.color_list[c])
+
+    @classmethod
+    def get_default_color_list(cls):
+        return [[166, 17, 129],
+                #[211, 211, 211],  # todo remove - Gray is for unrelated clonal only
+                  [39, 140, 24],
+                  [103, 200, 243],
+                  [248, 139, 16],
+                  [16, 49, 41],
+                  [93, 119, 254],
+                  [152, 22, 26],
+                  [104, 236, 172],
+                  [249, 142, 135],
+                  [55, 18, 48],
+                  [83, 82, 22],
+                  [247, 36, 36],
+                  [0, 79, 114],
+                  [243, 65, 132],
+                  [60, 185, 179],
+                  [185, 177, 243],
+                  [139, 34, 67],
+                  [178, 41, 186],
+                  [58, 146, 231],
+                  [130, 159, 21],
+                  [161, 91, 243],
+                  [131, 61, 17],
+                  [248, 75, 81],
+                  [32, 75, 32],
+                  [45, 109, 116],
+                  [255, 169, 199],
+                  [55, 179, 113],
+                  [34, 42, 3],
+                  [56, 121, 166],
+                  [172, 60, 15],
+                  [115, 76, 204],
+                  [21, 61, 73],
+                  [67, 21, 74],  # Additional colors, uglier and bad
+                  [123, 88, 112],
+                  [87, 106, 46],
+                  [37, 66, 58],
+                  [132, 79, 62],
+                  [71, 58, 32],
+                  [59, 104, 114],
+                  [46, 107, 90],
+                  [84, 68, 73],
+                  [90, 97, 124],
+                  [121, 66, 76],
+                  [104, 93, 48],
+                  [49, 67, 82],
+                  [71, 95, 65],
+                  [127, 85, 44],  # even more additional colors, gray
+                  [88, 79, 92],
+                  [220, 212, 194],
+                  [35, 34, 36],
+                  [200, 220, 224],
+                  [73, 81, 69],
+                  [224, 199, 206],
+                  [120, 127, 113],
+                  [142, 148, 166],
+                  [153, 167, 156],
+                  [162, 139, 145],
+                  [0, 0, 0]]  # black
 
 
 class HTMLTemplate(Template):
