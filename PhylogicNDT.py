@@ -199,14 +199,14 @@ def build_parser():
                             help='interval file with focal amp and del regions specified')
 
     clustering.add_argument('--Pi_k_r',
-                            type=int,
+                            type=float,
                             action='store',
                             dest='Pi_k_r',
                             default=3,
                             help='parameter r of the negative binomial prior over number of clusters')
 
     clustering.add_argument('--Pi_k_mu',
-                            type=int,
+                            type=float,
                             action='store',
                             dest='Pi_k_mu',
                             default=3,
