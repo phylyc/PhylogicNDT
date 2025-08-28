@@ -485,7 +485,7 @@ class PhylogicOutput(object):
         if pie_plots:
             sample_name_table_options['pie_plots'] = pie_plots
 
-        if child_dicts and tree_iterations:
+        if len(child_dicts) and len(tree_iterations):
             tree_coordinates_list = []
             print('Plotting trees')
             n_trees = 0
@@ -510,11 +510,12 @@ class PhylogicOutput(object):
                 tree_coordinates = cls.get_tree_coordinates(child_dict, dist_from_parent)
                 tree_coordinates_list.append(tree_coordinates)
 
-            tree_options = {'patient': patient, 'cluster_dict': cluster_dict,
-                            'child_dict': child_dicts[0], 'tree_coordinates': tree_coordinates_list[0]}
-            if n_trees > 1:
-                tree_switch_options = {'patient': patient, 'cluster_dict': cluster_dict, 'child_dicts': child_dicts,
-                                       'tree_coordinates': tree_coordinates_list, 'tree_iterations': tree_iterations}
+            if len(tree_coordinates_list):
+                tree_options = {'patient': patient, 'cluster_dict': cluster_dict,
+                                'child_dict': child_dicts[0], 'tree_coordinates': tree_coordinates_list[0]}
+                if n_trees > 1:
+                    tree_switch_options = {'patient': patient, 'cluster_dict': cluster_dict, 'child_dicts': child_dicts,
+                                           'tree_coordinates': tree_coordinates_list, 'tree_iterations': tree_iterations}
 
         if treatment_data:
             treatment_plot_options = {'treatments': treatment_data, 'samples': time_points,
