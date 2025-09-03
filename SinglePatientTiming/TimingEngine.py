@@ -1,3 +1,4 @@
+from collections import Counter
 import numpy as np
 import itertools
 from intervaltree import IntervalTree, Interval
@@ -6,6 +7,8 @@ import scipy.interpolate
 from scipy.special import logsumexp
 import random
 from data.Enums import CSIZE, CENT_LOOKUP
+import os
+import sys
 
 #TODO: get rid of these globals
 _chromosomes = tuple(map(str, range(1, 23))) + ('X',)
@@ -40,6 +43,7 @@ class TimingEngine(object):
         self.get_mutations()
         self.truncal_cn_events = {}
         self.get_arm_level_cn_events()
+        self.get_focal_cn_events()
 
     def get_concordant_cn_states(self):
         """
@@ -157,12 +161,20 @@ class TimingEngine(object):
         self.all_cn_events = {gl + chrN + arm: [] for gl, (chrN, arm) in itertools.product(('gain_', 'loss_'), self.arm_regions)}
         cluster_ccfs = self._get_cluster_ccfs()
         sample_idx = range(len(self.sample_list))
-        for cn_state in self.concordant_cn_states:
-            for i, eve in enumerate(self.concordant_cn_states[cn_state].cn_events):
+        for cn_state, state in self.concordant_cn_states.items():
+            # iterate over the *reference* events (typically Arm_gain and Arm_loss)
+            for eve in state.cn_events:
+                etype = eve.Type  # 'Arm_gain' or 'Arm_loss'
                 ccf_hats = []
                 for sample in self.sample_list:
-                    ccf_hats.append(sample.cn_states[cn_state].cn_events[i].ccf_hat)
-                ccf_idx = np.round(np.array(ccf_hats) * 100).astype(int)
+                    s_state = sample.cn_states.get(cn_state)
+                    if s_state is None:
+                        ccf_hats.append(0.0)
+                        continue
+                    # find the matching event by Type; default to 0 if missing
+                    match = next((e for e in s_state.cn_events if e.Type == etype), None)
+                    ccf_hats.append(float(getattr(match, 'ccf_hat', 0.0) or 0.0))
+                ccf_idx = np.clip(np.round(np.array(ccf_hats) * 100).astype(int), 0, 100)
                 clonal_concordance = np.prod(cluster_ccfs[1][sample_idx, ccf_idx])
                 is_clonal = True
                 for c in cluster_ccfs:
@@ -173,6 +185,148 @@ class TimingEngine(object):
                 self.all_cn_events[eve.event_name].append(eve)
                 if is_clonal:
                     self.truncal_cn_events[eve.event_name].append(eve)
+
+    def get_focal_cn_events(self):
+        """
+        Attach focal CNV events (produced by Patient.add_focal_cn_events) as TimingCNEvent instances.
+        Minimal: build a consensus (cn_a1, cn_a2) across samples in the window; clonality from focal ccf_hat.
+        """
+        n_samples = len(self.sample_list)
+        if n_samples == 0:
+            return
+
+        # --- cytoband cache: (chrom, band_name) -> (start_bp, end_bp)
+        _band_index = {}
+        _band_index_ready = False
+
+        def _ensure_band_index():
+            nonlocal _band_index_ready
+            if _band_index_ready:
+                return
+            try:
+                # locate the same cytoBand.txt used by Patient
+                patient_mod = sys.modules[type(self.patient).__module__]
+                cytopath = os.path.join(os.path.dirname(patient_mod.__file__), 'supplement_data', 'cytoBand.txt')
+                with open(cytopath) as f:
+                    for ln in f:
+                        chrom, start, end, band, *_ = ln.strip().split('\t')
+                        _band_index[(chrom.lstrip('chr'), band)] = (int(start), int(end))
+                _band_index_ready = True
+            except Exception as e:
+                print(f'Could not load cytoBand.txt for band→bp conversion: {e}')
+                _band_index_ready = True  # avoid retry storms
+
+        def _band_to_bp(chrom, band_obj):
+            """Return (start_bp, end_bp) for a Cytoband or band-name string; else None."""
+            if band_obj is None:
+                return None
+            name = getattr(band_obj, 'band', None) or str(band_obj)
+            _ensure_band_index()
+            return _band_index.get((str(chrom).lstrip('chr'), name))
+
+        def _coords(chrom, start, end):
+            """
+            Normalize event bounds to integer bps.
+            Accepts ints or Cytoband/string; returns (start_bp, end_bp) or None if unknown.
+            """
+            # ints already? just return
+            if isinstance(start, (int, np.integer)) and isinstance(end, (int, np.integer)):
+                return int(start), int(end)
+            # try cytoband → bp
+            s = _band_to_bp(chrom, start)
+            e = _band_to_bp(chrom, end)
+            if s is None or e is None:
+                return None
+            return s[0], e[1]
+
+        # group focal events across samples
+        groups = {}  # (chrom,start,end,arm,is_a1,category) -> {ccf: vec, cn_pairs: list, seg_bounds: list}
+        for si, ts in enumerate(self.sample_list):
+            for cn in ts.sample.low_coverage_mutations.values():
+                if getattr(cn, 'type', None) == 'CNV' and cn.cn_category.startswith('Focal_'):
+                    bounds = _coords(cn.chrN, cn.start, cn.end)
+                    if bounds is None:
+                        print(f'Skipping focal CNV without resolvable coords: {cn}')
+                        continue
+                    s_bp, e_bp = bounds
+                    key = (str(cn.chrN), s_bp, e_bp, cn.arm, cn.a1, cn.cn_category)
+                    rec = groups.setdefault(key, {'ccf': np.zeros(n_samples), 'cn_pairs': [None]*n_samples, 'seg_bounds': []})
+                    rec['ccf'][si] = cn.clust_ccf
+                    # segment with max overlap -> (cn_a1, cn_a2)
+                    cn_a1 = np.nan
+                    cn_a2 = np.nan
+                    try:
+                        ov = list(ts.CnProfile[str(cn.chrN)].overlap(s_bp, e_bp))
+                    except Exception:
+                        ov = []
+                    if ov:
+                        best = max(ov, key=lambda iv: max(0, min(iv.end, int(e_bp)) - max(iv.begin, int(s_bp))))
+                        seg = best.data[1]
+                        cn_a1 = float(seg['cn_a1'])
+                        cn_a2 = float(seg['cn_a2'])
+                        rec['seg_bounds'].append((best.begin, best.end))
+                    rec['cn_pairs'][si] = (cn_a1, cn_a2)
+
+        if not groups:
+            return
+
+        cluster_ccfs = self._get_cluster_ccfs()
+        sample_idx = range(n_samples)
+
+        def consensus_pair(pairs):
+            vals = []
+            for a1, a2 in pairs:
+                if a1 is None or a2 is None or np.isnan(a1) or np.isnan(a2):
+                    continue
+                a1r = round(a1) if abs(a1 - round(a1)) <= 0.2 else a1
+                a2r = round(a2) if abs(a2 - round(a2)) <= 0.2 else a2
+                vals.append((a1r, a2r))
+            return Counter(vals).most_common(1)[0][0] if vals else None
+
+        for (chrom, start, end, arm, is_a1, category), rec in groups.items():
+            cn_state = consensus_pair(rec['cn_pairs'])
+            if cn_state is None:
+                continue
+            # gather supporting mutations in the UNION of best-overlap segments (more SNVs, same CN state)
+            if rec['seg_bounds']:
+                sup_start = min(b for b, _ in rec['seg_bounds'])
+                sup_end = max(e for _, e in rec['seg_bounds'])
+            else:
+                sup_start, sup_end = start, end
+            supporting_muts = []
+            for ts in self.sample_list:
+                for iv in ts.mutation_intervaltree.get(chrom, IntervalTree())[sup_start:sup_end]:
+                    mut = iv.data  # TimingMut
+                    if (mut.local_cn_a1 == cn_state[0]).all() and (mut.local_cn_a2 == cn_state[1]).all():
+                        supporting_muts.append(mut)
+            purity = [s.purity for s in self.sample_list]
+            state = TimingCNState(self.sample_list, chrom, arm, cn_state, purity, supporting_muts=supporting_muts)
+            state.call_events(cn_type_prefix='Focal', wgd=(self.WGD is not None))
+            # select allele-matched focal event
+            eve = None
+            for e in state.cn_events:
+                if e.Type == category and ((is_a1 and e.allelic_cn == cn_state[0]) or (not is_a1 and e.allelic_cn == cn_state[1])):
+                    eve = e
+                    break
+            if eve is None:
+                continue
+            # make it uniquely identifiable
+            eve.start = int(start)
+            eve.end = int(end)
+            # focal-specific fallback: if low evidence, avoid collapsing to "after everything"
+            if len(supporting_muts) < self.min_supporting_muts:
+                eve.pi_dist = np.ones(101, dtype=float) / 101
+            # clonality from focal ccf_hat vector
+            ccf_idx = np.rint(np.clip(np.nan_to_num(np.asarray(rec['ccf'], float), nan=0.0, posinf=1.0, neginf=0.0),0.0, 1.0) * 100).astype(int)
+            clonal_conc = np.prod(cluster_ccfs.get(1, np.ones((n_samples, 101)))[sample_idx, ccf_idx])
+            is_clonal = True
+            for c, grid in cluster_ccfs.items():
+                if np.prod(grid[sample_idx, ccf_idx]) > clonal_conc:
+                    is_clonal = False; break
+            eve.is_clonal = is_clonal
+            self.all_cn_events.setdefault(eve.event_name, []).append(eve)
+            if is_clonal:
+                self.truncal_cn_events.setdefault(eve.event_name, []).append(eve)
 
     def _get_cluster_ccfs(self):
         n_samples = len(self.sample_list)
@@ -498,7 +652,7 @@ class TimingCNState(object):
 class TimingCNEvent(object):
     def __init__(self, sample_list, state, Type=None, chrN=None, arm=None, pi_dist=None, copy_number=None,
                  allelic_cn=None, supporting_muts=None, is_clonal=None, cluster_id=None,
-                 cn_state_whitelist=_cn_state_whitelist, ccf_hat=None):
+                 cn_state_whitelist=_cn_state_whitelist, ccf_hat=None, start=None, end=None):
         self.sample_list = sample_list
         self.state = state
         self.Type = Type
@@ -516,15 +670,26 @@ class TimingCNEvent(object):
         self.cn_state_whitelist = cn_state_whitelist
         self.gain = None
         self.ccf_hat = ccf_hat
+        self.start = start
+        self.end = end
+
 
     def __repr__(self):
+        if self.Type.startswith('Focal_') and self.start is not None and self.end is not None:
+            return '<TimingCNEvent object: {}_{}{}:{}-{}>'.format(self.Type, self.chrN, self.arm, self.start, self.end)
         return '<TimingCNEvent object: {}_{}{}>'.format(self.Type, self.chrN, self.arm)
 
     @property
     def event_name(self):
         if self.Type.startswith('Arm_'):
             return self.Type[4:] + '_' + self.chrN + self.arm
-        raise NotImplementedError('ONLY ARM EVENTS CURRENTLY SUPPORTED')
+        if self.Type.startswith('Focal_'):
+            # e.g., Focal_gain_17q:37000000-37800000 (unique per window)
+            coord = (f'{self.chrN}{self.arm}:{self.start}-{self.end}'
+                     if self.start is not None and self.end is not None
+                     else f'{self.chrN}{self.arm}')
+            return f'{self.Type}_{coord}'
+        raise NotImplementedError('ONLY ARM AND FOCAL EVENTS CURRENTLY SUPPORTED')
 
     @property
     def log_p2_prior(self):

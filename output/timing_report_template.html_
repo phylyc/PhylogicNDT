@@ -406,7 +406,7 @@
               .text(event_name.replace("_", " "));
 
             let zero_str = Array(101).fill(0).reduce((a, c, i) => a + " " + x(100 - i) + "," + y(0), ""),
-              color = event_name.startsWith("loss") ? "blue" : "green";
+              color = (event_name.startsWith("loss") || event_name.startsWith("Focal loss") || event_name.startsWith("Focal_loss")) ? "blue" : "green";
 
             pi_hist.append("polygon")
               .attr("points", pi_dist.reduce((a, c, i) => a + x(i) + "," + y(c) + " ", "") + zero_str)

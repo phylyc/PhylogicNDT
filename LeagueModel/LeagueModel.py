@@ -10,16 +10,11 @@ def run_league_model(args):
     if args.comparison_fn is not None:
         full_comp_fn = args.comparison_fn
     elif args.comparison_fn is None and args.comps is not None:
-        full_comp_fn = args.cohort + '.comparisons.tsv'
-        output = open(full_comp_fn, 'w')
-        output.write('\t'.join(['sample', 'event1', 'event2', 'p_event1_win', 'p_event2_win', 'unknown']) + '\n')
-        for fn in args.comps:
-            with open(fn, 'r') as input_fn:
-                for i, row in enumerate(input_fn):
-                    if i == 0: continue
-                    output.write(row)
-                output.write('\n')
-        output.close()
+        full_comp_fn = args.cohort + '.comparisons.tsv.gz'
+        pd.concat([
+            pd.read_csv(fn, sep="\t", header=0, names=['sample', 'event1', 'event2', 'p_event1_win', 'p_event2_win', 'unknown'], low_memory=False)
+            for fn in args.comps
+        ]).to_csv(full_comp_fn, sep="\t", index=False)
     else:
         logging.error('Please Provide Input Data for League Model')
         return 0
@@ -77,7 +72,7 @@ def run_league_model(args):
     for j in range(args.n_perms):
         logging.info('running iter:' + str(j))
 
-        rand_subset = set(random.sample(all_samps, int(len(all_samps) * args.percent_subset)))
+        rand_subset = set(random.sample(sorted(all_samps), int(len(all_samps) * args.percent_subset)))
         league_model_run.run_permutation(num_seasons=args.n_seasons, samples=rand_subset,
                                          final_event_list=league_model_run.final_event_list)
         league_model_run.update_odds()

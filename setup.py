@@ -27,7 +27,7 @@ def get_packages():
 setuptools.setup(
     name="PhylogicNDT",
     description="Phylogenetic Inference",
-    version="1.1",
+    version="1.2",
     long_description=read("README.md"),
     url="",
     classifiers=[

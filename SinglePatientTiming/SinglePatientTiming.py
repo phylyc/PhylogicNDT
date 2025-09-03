@@ -44,8 +44,13 @@ def run_tool(args):
                                    timepoint_value=timepoint, grid_size=args.grid_size,
                                    _additional_muts=None, seg_file=seg_fn, purity=purity)
 
+    if args.intersect_cn_trees:
+        patient_data.intersect_cn_trees()
+    else:
+        patient_data.get_arm_level_cn_events()
+        if args.gistic_fn:
+            patient_data.add_focal_cn_events(focal_regions=args.gistic_fn)
     patient_data.preprocess_samples()
-    patient_data.get_arm_level_cn_events()
     if args.min_supporting_muts < 1:
         raise ValueError('Invalid value for min_supporting_muts')
     timing_engine = TimingEngine.TimingEngine(patient_data, min_supporting_muts=args.min_supporting_muts)

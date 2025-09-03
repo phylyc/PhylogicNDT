@@ -5,7 +5,7 @@ import logging
 from intervaltree import IntervalTree
 
 import numpy as np
-import scipy.stats
+import scipy.stats as st
 
 
 ##########################################################
@@ -268,7 +268,7 @@ class CopyNumberEvent():
                 elif beta < 1.:
                     self.ccf_1d = np.append(np.zeros(100), 1.)
                 else:
-                    self.ccf_1d = scipy.stats.beta.pdf(np.arange(101.) / 100, alpha, beta)
+                    self.ccf_1d = st.beta.pdf(np.arange(101.) / 100, alpha, beta)
                     self.ccf_1d /= sum(self.ccf_1d)
         self.seg_tree = seg_tree
         self.clust_ccf = clust_ccf
@@ -503,7 +503,7 @@ class CN_SegProfile:
         elif file_extension == '.db':
             return 'sqlite'
         else:
-            print >> sys.stderr, "ERROR: Cannot guess file type please use .RData, .txt, .tsv or .db"
+            print("ERROR: Cannot guess file type please use .RData, .txt, .tsv or .db")
         sys.exit(1)
 
     def _load_segs(self, seg_file, input_type='absolute'):

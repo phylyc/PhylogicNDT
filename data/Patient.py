@@ -5,7 +5,7 @@ from data.Sample import TumorSample
 from data.Sample import RNASample
 from data.SomaticEvents import SomMutation, CopyNumberEvent
 from data.Enums import CSIZE, CENT_LOOKUP
-from collections import defaultdict
+from collections import defaultdict, Counter
 import os
 import sys
 import logging
@@ -371,160 +371,385 @@ class Patient:
                 #     mut.cluster_assignment = None
                 #     mut.clust_ccf = None
 
-    # def intersect_cn_trees(self):
-    #     """
-    #     Gets copy number events from segment trees and adds them to samples
-    #
-    #     """
-    #     def get_bands(chrom, start, end, cytoband=os.path.dirname(__file__) + '/supplement_data/cytoBand.txt'):
-    #         """
-    #         Gets cytobands hit by a CN event
-    #
-    #         """
-    #         bands = []
-    #         on_c = False
-    #         with open(cytoband, 'r') as f:
-    #             for line in f:
-    #                 row = line.strip('\n').split('\t')
-    #                 if row[0].strip('chr') != str(chrom):
-    #                     if on_c:
-    #                         return bands
-    #                     continue
-    #                 if int(row[1]) <= end and int(row[2]) >= start:
-    #                     bands.append(Cytoband(chrom, row[3]))
-    #                     on_c = True
-    #                 if int(row[1]) > end:
-    #                     return bands
-    #
-    #     def merge_cn_events(event_segs, neighbors, R=frozenset(), X=frozenset()):
-    #         """
-    #         Merges copy number events on a single chromosome if they are adjacent and their ccf values are similar
-    #
-    #         Args:
-    #             event_segs: set of CN segments represented as tuple(bands, CNs, CCF_hats, CCF_highs, CCF_lows, allele)
-    #             neighbors: dict mapping seg to set of neighbors (segs with similar CCFs)
-    #             R: only populated in recursive calls
-    #             X: only populated in recursive calls
-    #
-    #         Returns:
-    #             Generator for merged segs
-    #         """
-    #         is_max = True
-    #         for s in itertools.chain(event_segs, X):
-    #             if isadjacent(s, R):
-    #                 is_max = False
-    #                 break
-    #         if is_max:
-    #             bands = set.union(*(set(b[0]) for b in R))
-    #             cns = next(iter(R))[1]
-    #             ccf_hat = np.zeros(len(self.sample_list))
-    #             ccf_high = np.zeros(len(self.sample_list))
-    #             ccf_low = np.zeros(len(self.sample_list))
-    #             for seg in R:
-    #                 ccf_hat += np.array(seg[2])
-    #                 ccf_high += np.array(seg[3])
-    #                 ccf_low += np.array(seg[4])
-    #             yield (bands, cns, ccf_hat / len(R), ccf_high / len(R), ccf_low / len(R))
-    #         else:
-    #             for s in event_segs:
-    #                 if isadjacent(s, R):
-    #                     for region in merge_cn_events(event_segs & neighbors[s], neighbors, R=R | {s}, X=X & neighbors[s]):
-    #                         yield region
-    #                     event_segs = event_segs - {s}
-    #                     X = X | {s}
-    #
-    #     def isadjacent(s, R):
-    #         """
-    #         Copy number events are adjacent if the max band of one is the same as
-    #         or adjacent to the min band of the other
-    #
-    #         """
-    #         if not R:
-    #             return True
-    #         Rchain = list(itertools.chain(*(b[0] for b in R)))
-    #         minR = min(Rchain)
-    #         maxR = max(Rchain)
-    #         mins = min(s[0])
-    #         maxs = max(s[0])
-    #         if mins >= maxR:
-    #             return mins - maxR <= 1 and mins.band[0] == maxR.band[0]
-    #         elif maxs <= minR:
-    #             return minR - maxs <= 1 and maxs.band[0] == minR.band[0]
-    #         else:
-    #             return False
-    #
-    #     c_trees = {}
-    #     n_samples = len(self.sample_list)
-    #     for chrom in list(map(str, range(1, 23)))+['X', 'Y']:
-    #         tree = IntervalTree()
-    #         for sample in self.sample_list:
-    #             if sample.CnProfile:
-    #                 tree.update(sample.CnProfile[chrom])
-    #         tree.split_overlaps()
-    #         tree.merge_equals(data_initializer=[], data_reducer=lambda a, c: a + [c])
-    #         c_tree = IntervalTree(filter(lambda s: len(s.data) == n_samples, tree))
-    #         c_trees[chrom] = c_tree
-    #         event_segs = set()
-    #         for seg in c_tree:
-    #             start = seg.begin
-    #             end = seg.end
-    #             bands = get_bands(chrom, start, end)
-    #             cns_a1 = []
-    #             cns_a2 = []
-    #             ccf_hat_a1 = []
-    #             ccf_hat_a2 = []
-    #             ccf_high_a1 = []
-    #             ccf_high_a2 = []
-    #             ccf_low_a1 = []
-    #             ccf_low_a2 = []
-    #             for i, sample in enumerate(self.sample_list):
-    #                 seg_data = seg.data[i][1]
-    #                 cns_a1.append(seg_data['cn_a1'])
-    #                 cns_a2.append(seg_data['cn_a2'])
-    #                 ccf_hat_a1.append(seg_data['ccf_hat_a1'] if seg_data['cn_a1'] != 1 else 0.)
-    #                 ccf_hat_a2.append(seg_data['ccf_hat_a2'] if seg_data['cn_a2'] != 1 else 0.)
-    #                 ccf_high_a1.append(seg_data['ccf_high_a1'] if seg_data['cn_a1'] != 1 else 0.)
-    #                 ccf_high_a2.append(seg_data['ccf_high_a2'] if seg_data['cn_a2'] != 1 else 0.)
-    #                 ccf_low_a1.append(seg_data['ccf_low_a1'] if seg_data['cn_a1'] != 1 else 0.)
-    #                 ccf_low_a2.append(seg_data['ccf_low_a2'] if seg_data['cn_a2'] != 1 else 0.)
-    #             cns_a1 = np.array(cns_a1)
-    #             cns_a2 = np.array(cns_a2)
-    #             if np.all(cns_a1 == 1):
-    #                 pass
-    #             elif np.all(cns_a1 >= 1) or np.all(cns_a1 <= 1):
-    #                 event_segs.add((tuple(bands), tuple(cns_a1), tuple(ccf_hat_a1), tuple(ccf_high_a1), tuple(ccf_low_a1), 'a1'))
-    #             else:
-    #                 logging.warning('Seg with inconsistent event: {}:{}:{}'.format(chrom, seg.begin, seg.end))
-    #             if np.all(cns_a2 == 1):
-    #                 pass
-    #             elif np.all(cns_a2 >= 1) or np.all(cns_a2 <= 1):
-    #                 event_segs.add((tuple(bands), tuple(cns_a2), tuple(ccf_hat_a2), tuple(ccf_high_a2), tuple(ccf_low_a2), 'a2'))
-    #             else:
-    #                 logging.warning('Seg with inconsistent event: {}:{}:{}'.format(chrom, seg.begin, seg.end))
-    #         neighbors = {s: set() for s in event_segs}
-    #         for seg1, seg2 in itertools.combinations(event_segs, 2):
-    #             s1_hat = np.array(seg1[2])
-    #             s2_hat = np.array(seg2[2])
-    #             if seg1[1] == seg2[1] and np.all(s1_hat >= np.array(seg2[4])) and np.all(s1_hat <= np.array(seg2[3]))\
-    #             and np.all(s2_hat >= np.array(seg1[4])) and np.all(s2_hat <= np.array(seg1[3])):
-    #                 neighbors[seg1].add(seg2)
-    #                 neighbors[seg2].add(seg1)
-    #
-    #         event_cache = []
-    #         if event_segs:
-    #             for bands, cns, ccf_hat, ccf_high, ccf_low in merge_cn_events(event_segs, neighbors):
-    #                 mut_category = 'gain' if sum(cns) > len(self.sample_list) else 'loss'
-    #                 a1 = (mut_category, bands) not in event_cache
-    #                 if a1:
-    #                     event_cache.append((mut_category, bands))
-    #                 self._add_cn_event_to_samples(chrom, min(bands), max(bands), cns, mut_category, ccf_hat, ccf_high,
-    #                     ccf_low, a1, dupe=not a1)
-    #     self.concordant_cn_tree = c_trees
+    @staticmethod
+    def _infer_cn_category(cn_vec, hat_vec=None, eps=0.25, tau=0.5, use_ccf_weight=True):
+        """
+        Decide 'gain' vs 'loss' from per-sample allele CNs.
+        cn_vec: tuple/list of per-sample allele CN (int)
+        hat_vec: optional per-sample CCF hats (same length)
+        eps: neutrality threshold for |CN-1|
+        tau: required consensus fraction among non-neutral samples
+        """
+        import numpy as np
+        cn = np.array(cn_vec, dtype=float)
+        if hat_vec is None:
+            w = np.ones_like(cn)
+        else:
+            w = np.array(hat_vec, dtype=float) if use_ccf_weight else np.ones_like(cn)
 
-    # def get_arm_level_cn_events(self, size_threshold=.4):
-    #     chromosomes = list(map(str, range(1, 23))) + ['X']
-    #     for chrN, arm in itertools.product(chromosomes, 'pq'):
-    #         centromere
+        # Non-neutral mask
+        m = np.abs(cn - 1.0) > eps
+        if not np.any(m):
+            return None  # neutral overall
+
+        # Signed vote
+        D = np.sum(w[m] * (cn[m] - 1.0))
+
+        # Consensus requirement
+        signD = 1 if D > 0 else (-1 if D < 0 else 0)
+        if signD == 0:
+            return None
+        agree = np.sum(np.sign(cn[m] - 1.0) == signD)
+        frac = agree / float(np.sum(m))
+        if frac < tau:
+            return None  # ambiguous
+
+        return 'gain' if D > 0 else 'loss'
+
+    def intersect_cn_trees(self):
+        """
+        Gets copy number events from segment trees and adds them to samples
+
+        """
+        def merge_cn_events(event_segs, neighbors, R=frozenset(), X=frozenset()):
+            """
+            Merges copy number events on a single chromosome if they are adjacent and their ccf values are similar
+
+            Args:
+                event_segs: set of CN segments represented as tuple(bands, CNs, CCF_hats, CCF_highs, CCF_lows, allele)
+                neighbors: dict mapping seg to set of neighbors (segs with similar CCFs)
+                R: only populated in recursive calls
+                X: only populated in recursive calls
+
+            Returns:
+                Generator for merged segs
+            """
+            is_max = True
+            for s in itertools.chain(event_segs, X):
+                if isadjacent(s, R):
+                    is_max = False
+                    break
+            if is_max:
+                bands = set.union(*(set(b[0]) for b in R))
+                cns = next(iter(R))[1]
+                ccf_hat = np.zeros(len(self.sample_list))
+                ccf_high = np.zeros(len(self.sample_list))
+                ccf_low = np.zeros(len(self.sample_list))
+                arm = next(iter(R))[6]
+                for seg in R:
+                    ccf_hat += np.array(seg[2])
+                    ccf_high += np.array(seg[3])
+                    ccf_low += np.array(seg[4])
+                yield (bands, cns, ccf_hat / len(R), ccf_high / len(R), ccf_low / len(R), arm)
+            else:
+                for s in event_segs:
+                    if isadjacent(s, R):
+                        for region in merge_cn_events(event_segs & neighbors[s], neighbors, R=R | {s}, X=X & neighbors[s]):
+                            yield region
+                        event_segs = event_segs - {s}
+                        X = X | {s}
+
+        def isadjacent(s, R):
+            """
+            Copy number events are adjacent if the max band of one is the same as
+            or adjacent to the min band of the other
+
+            """
+            if not R:
+                return True
+            Rchain = list(itertools.chain(*(b[0] for b in R)))
+            minR = min(Rchain)
+            maxR = max(Rchain)
+            mins = min(s[0])
+            maxs = max(s[0])
+            if mins >= maxR:
+                return mins - maxR <= 1 and mins.band[0] == maxR.band[0]
+            elif maxs <= minR:
+                return minR - maxs <= 1 and maxs.band[0] == minR.band[0]
+            else:
+                return False
+
+        c_trees = {}
+        n_samples = len(self.sample_list)
+        for ckey, (chrom, csize) in enumerate(zip(list(map(str, range(1, 23))) + ['X', 'Y'], CSIZE)):
+            centromere = CENT_LOOKUP[ckey + 1]
+            tree = IntervalTree()
+            for sample in self.sample_list:
+                if sample.CnProfile:
+                    tree.update(sample.CnProfile[chrom])
+            tree.split_overlaps()
+            tree.merge_equals(data_initializer=[], data_reducer=lambda a, c: a + [c])
+            c_tree = IntervalTree(filter(lambda s: len(s.data) == n_samples, tree))
+            c_trees[chrom] = c_tree
+            event_segs = set()
+            for seg in c_tree:
+                start = seg.begin
+                end = seg.end
+                arm = "p" if end <= centromere else "q"
+                bands = get_bands(chrom, start, end)
+                cns_a1 = []
+                cns_a2 = []
+                ccf_hat_a1 = []
+                ccf_hat_a2 = []
+                ccf_high_a1 = []
+                ccf_high_a2 = []
+                ccf_low_a1 = []
+                ccf_low_a2 = []
+                for i, sample in enumerate(self.sample_list):
+                    seg_data = seg.data[i][1]
+                    cns_a1.append(seg_data['cn_a1'])
+                    cns_a2.append(seg_data['cn_a2'])
+                    ccf_hat_a1.append(seg_data['ccf_hat_a1'] if seg_data['cn_a1'] != 1 else 0.)
+                    ccf_hat_a2.append(seg_data['ccf_hat_a2'] if seg_data['cn_a2'] != 1 else 0.)
+                    ccf_high_a1.append(seg_data['ccf_high_a1'] if seg_data['cn_a1'] != 1 else 0.)
+                    ccf_high_a2.append(seg_data['ccf_high_a2'] if seg_data['cn_a2'] != 1 else 0.)
+                    ccf_low_a1.append(seg_data['ccf_low_a1'] if seg_data['cn_a1'] != 1 else 0.)
+                    ccf_low_a2.append(seg_data['ccf_low_a2'] if seg_data['cn_a2'] != 1 else 0.)
+                cns_a1 = np.array(cns_a1)
+                cns_a2 = np.array(cns_a2)
+                if np.all(cns_a1 == 1):
+                    pass
+                elif np.all(cns_a1 >= 1) or np.all(cns_a1 <= 1):
+                    event_segs.add((tuple(bands), tuple(cns_a1), tuple(ccf_hat_a1), tuple(ccf_high_a1), tuple(ccf_low_a1), 'a1', arm))
+                else:
+                    logging.warning('Seg with inconsistent event: {}:{}:{}'.format(chrom, seg.begin, seg.end))
+                if np.all(cns_a2 == 1):
+                    pass
+                elif np.all(cns_a2 >= 1) or np.all(cns_a2 <= 1):
+                    event_segs.add((tuple(bands), tuple(cns_a2), tuple(ccf_hat_a2), tuple(ccf_high_a2), tuple(ccf_low_a2), 'a2', arm))
+                else:
+                    logging.warning('Seg with inconsistent event: {}:{}:{}'.format(chrom, seg.begin, seg.end))
+
+            neighbors = {s: set() for s in event_segs}
+            for seg1, seg2 in itertools.combinations(event_segs, 2):
+                s1_hat = np.array(seg1[2])
+                s2_hat = np.array(seg2[2])
+                if (
+                    seg1[6] == seg2[6] and
+                    seg1[1] == seg2[1] and
+                    np.all(s1_hat >= np.array(seg2[4])) and
+                    np.all(s1_hat <= np.array(seg2[3])) and
+                    np.all(s2_hat >= np.array(seg1[4])) and
+                    np.all(s2_hat <= np.array(seg1[3]))
+                ):
+                    neighbors[seg1].add(seg2)
+                    neighbors[seg2].add(seg1)
+
+            event_cache = []
+            if event_segs:
+                for bands, cns, ccf_hat, ccf_high, ccf_low, arm in merge_cn_events(event_segs, neighbors):
+                    mut_category = self._infer_cn_category(cns, ccf_hat)
+                    if mut_category is None:
+                        print("[DROPPED]", bands, cns, ccf_hat)
+                        continue
+                    mut_category = "Focal_" + mut_category
+                    # mut_category = 'Focal_gain' if sum(cns) > len(self.sample_list) else 'Focal_loss'
+                    a1 = (mut_category, bands) not in event_cache
+                    if a1:
+                        event_cache.append((mut_category, bands))
+                    self._add_cn_event_to_samples(chrom, min(bands), max(bands), arm, cns, mut_category, ccf_hat, ccf_high, ccf_low, a1, dupe=not a1)
+        self.concordant_cn_tree = c_trees
+
+    def add_focal_cn_events(self, focal_regions, qval_max=None, focal_max_arm_frac=0.3, min_bp_overlap=1000, padding=10000, require_directional_consistency=False, split_across_centromere=True):
+        """
+        Add focal CNV events (e.g., from GISTIC2 peaks) as CopyNumberEvents.
+
+        Args:
+            focal_regions:
+                - str path to a BED-like file: chrom  start  end  [type] [q] [name]
+                  (type in {'AMP','DEL'} optional; q optional; extra columns ignored)
+                - iterable of dicts, each with keys:
+                    {'chrom', 'start', 'end'} and optional {'type','q','name'}
+            qval_max: float or None. If set, skip focals with q > qval_max.
+            focal_max_arm_frac: float in (0,1]. Skip regions covering >= this fraction of the arm (keep them arm-level).
+            min_bp_overlap: minimum bp overlap between focal window and a CN segment to count that segment.
+            padding: padding of focal window to check for overlap with CN segment to count that segment.
+            require_directional_consistency: if True, for each sample+allele, if overlapping segments
+                include both gains and losses (relative to CN=1), treat that sample/allele as neutral for this focal.
+            split_across_centromere: if True, split windows crossing the centromere into p and q parts; otherwise skip.
+        """
+
+        # --- helpers ---
+        def _normalize_focals(focals):
+            """Return dict: chrom -> list of dicts {chrom,start,end,type,q,name}."""
+            out = defaultdict(list)
+            if isinstance(focals, str):
+                with open(focals) as fin:
+                    for ln in fin:
+                        if not ln.strip() or ln.startswith('#') or ln.startswith("track name"):
+                            continue
+                        t = ln.strip().split()
+                        chrom = t[0].lstrip('chr')
+                        start = int(t[1])
+                        end = int(t[2])
+                        ftype = "AMP" if "Any-AP" in t[3] else "DEL" if "Any-DP" in t[3] else t[3].upper() if len(t) > 3 else None
+                        q = float(t[4]) if len(t) > 4 and t[4].replace('.', '', 1).isdigit() else None
+                        name = t[5] if len(t) > 5 else None
+                        out[chrom].append({'chrom': chrom, 'start': start, 'end': end, 'type': ftype, 'q': q, 'name': name})
+                return out
+            # iterable
+            for r in focals:
+                d = dict(r)
+                d['chrom'] = str(d.get('chrom') or d.get('chr')).lstrip('chr')
+                d['start'] = int(d['start'])
+                d['end'] = int(d['end'])
+                if 'type' in d and d['type'] is not None:
+                    d['type'] = str(d['type']).upper()
+                if 'q' in d and d['q'] is not None:
+                    d['q'] = float(d['q'])
+                out[d['chrom']].append(d)
+            return out
+
+        def _merge_by_type(regs):
+            """Merge overlapping intervals within AMP and within DEL; pass through untyped."""
+            def _norm(t):
+                if not t: return None
+                u = str(t).upper()
+                return 'AMP' if u.startswith('AMP') else ('DEL' if u.startswith('DEL') else None)
+
+            out = []
+            for T in ('AMP', 'DEL'):
+                xs = [dict(r, type=T) for r in regs if _norm(r.get('type')) == T]
+                xs.sort(key=lambda d: (int(d['start']), int(d['end'])))
+                cur = None
+                for r in xs:
+                    s, e = int(r['start']), int(r['end'])
+                    if cur is None or s > cur['end']:
+                        cur = {'chrom': r['chrom'], 'start': s, 'end': e, 'type': T}
+                        out.append(cur)
+                    else:
+                        cur['end'] = max(cur['end'], e)
+            # keep untyped as-is
+            out += [r for r in regs if _norm(r.get('type')) is None]
+            return out
+
+        def _len_weighted_mode(values, weights):
+            acc = Counter()
+            for v, w in zip(values, weights):
+                acc[int(v)] += float(w)
+            if not acc:
+                return 1
+            return max(acc.items(), key=lambda kv: kv[1])[0]
+
+        def _summarize_sample_interval(sample, chrom, s, e, allele_key):
+            """
+            Summarize allele-specific CN & CCF within [s,e) for one sample.
+            Returns (cn, hat, hi, lo), with CCFs zeroed if cn==1 (neutral).
+            """
+            cn_prof = sample.CnProfile
+            if not cn_prof or chrom not in cn_prof:
+                return 1, 0.0, 0.0, 0.0
+
+            overlaps = list(cn_prof[chrom].overlap(min(0, s - padding), e + padding))
+            if not overlaps:
+                return 1, 0.0, 0.0, 0.0
+
+            ws, cns, hats, his, los = [], [], [], [], []
+            for iv in overlaps:
+                ov = max(0, min(iv.end, e + padding) - max(iv.begin, s - padding))
+                if ov < min_bp_overlap:
+                    continue
+                seg_data = iv.data[1] if isinstance(iv.data, (list, tuple)) else iv.data
+                ws.append(ov)
+                cns.append(int(seg_data[f"cn_{allele_key}"]))
+                hats.append(seg_data[f"ccf_hat_{allele_key}"])
+                his.append(seg_data[f"ccf_high_{allele_key}"])
+                los.append(seg_data[f"ccf_low_{allele_key}"])
+
+            if not ws:
+                return 1, 0.0, 0.0, 0.0
+
+            # optional: enforce directional consistency within this sample+allele
+            if require_directional_consistency:
+                dirs = {np.sign(c - 1) for c in cns if c != 1}
+                if len(dirs) > 1:
+                    return 1, 0.0, 0.0, 0.0
+
+            cn_mode = _len_weighted_mode(cns, ws)
+            if cn_mode == 1:
+                return 1, 0.0, 0.0, 0.0
+
+            wsum = float(sum(ws))
+            hat = float(np.dot(hats, ws) / wsum)
+            hi = float(np.dot(his, ws) / wsum)
+            lo = float(np.dot(los, ws) / wsum)
+            return int(cn_mode), hat, hi, lo
+
+        def _split_by_centromere(chrom, start, end, centromere, chrom_size):
+            if not split_across_centromere:
+                # if it crosses the centromere, skip (keeps method focal-only)
+                if start < centromere < end:
+                    return []
+                arm = 'p' if end <= centromere else 'q'
+                return [(start, end, arm)]
+            if start < centromere < end:
+                return [(start, centromere, 'p'), (centromere, end, 'q')]
+            arm = 'p' if end <= centromere else 'q'
+            return [(start, end, arm)]
+
+        # --- main ---
+        focals_by_chr = _normalize_focals(focal_regions)
+
+        for ckey, (chrom, csize) in enumerate(zip(list(map(str, range(1, 23))) + ['X', 'Y'], CSIZE)):
+            centromere = CENT_LOOKUP[ckey + 1]
+            regs = focals_by_chr.get(chrom, [])
+            if not regs:
+                continue
+
+            regs = _merge_by_type(regs)
+
+            arm_len = {'p': centromere, 'q': csize - centromere}
+
+            for R in regs:
+                # q-value filter if provided in record and threshold set
+                if qval_max is not None and "q" in R is not None and R['q'] > qval_max:
+                    continue
+                s, e = int(R['start']), int(R['end'])
+                if e <= s:
+                    continue
+
+                subregs = _split_by_centromere(chrom, s, e, centromere, csize)
+                for (s0, e0, arm_lbl) in subregs:
+                    # focal filter vs arm fraction
+                    if (e0 - s0) / float(arm_len[arm_lbl]) >= focal_max_arm_frac:
+                        # this window is too large; treat as arm-level elsewhere
+                        continue
+
+                    bands = get_bands(chrom, s0, e0)
+
+                    # summarize per-allele across samples
+                    results = {}
+                    for allele_key in ('a1', 'a2'):
+                        cn_vec, hat, hi, lo = [], [], [], []
+                        for sample in self.sample_list:
+                            cn_i, hat_i, hi_i, lo_i = _summarize_sample_interval(sample, chrom, s0, e0, allele_key)
+                            cn_vec.append(cn_i)
+                            hat.append(hat_i)
+                            hi.append(hi_i)
+                            lo.append(lo_i)
+                        results[allele_key] = (tuple(cn_vec), tuple(hat), tuple(hi), tuple(lo))
+
+                    # emit an event for each allele with any non-neutral evidence
+                    for allele_key, (cn_vec, hat, hi, lo) in results.items():
+                        if all(cn == 1 for cn in cn_vec):
+                            continue
+
+                        if R['type'] in ('AMP', 'AMPLIFICATION'):
+                            gistic_cn_category = 'Focal_gain'
+                        elif R['type'] in ('DEL', 'DELETION'):
+                            gistic_cn_category = 'Focal_loss'
+                        else:
+                            gistic_cn_category = ""
+
+                        # cn_category = 'Focal_gain' if any(cn > 1 for cn in cn_vec) else 'Focal_loss'
+                        cn_category = self._infer_cn_category(cn_vec, hat)
+                        if cn_category is None:
+                            print("[DROPPED]", bands, cn_vec, hat)
+                            continue
+                        cn_category = "Focal_" + cn_category
+
+                        if cn_category == gistic_cn_category:
+                            self._add_cn_event_to_samples(chrom=chrom, start=min(bands), end=max(bands), arm=arm_lbl, cns=cn_vec, cn_category=cn_category, ccf_hat=hat, ccf_high=hi, ccf_low=lo, a1=(allele_key == 'a1'), dupe=False)
 
     def get_arm_level_cn_events(self):
         n_samples = len(self.sample_list)
@@ -541,6 +766,7 @@ class Patient:
             for seg in c_tree:
                 start = seg.begin
                 end = seg.end
+                bands = get_bands(chrom, start, end)
                 cns_a1 = []
                 cns_a2 = []
                 ccf_hat_a1 = []
@@ -565,26 +791,26 @@ class Patient:
                     pass
                 elif np.all(cns_a1 >= 1) or np.all(cns_a1 <= 1):
                     if start < centromere < end:
-                        event_segs.add((start, centromere, 'p', tuple(cns_a1), tuple(ccf_hat_a1), tuple(ccf_high_a1), tuple(ccf_low_a1), 'a1'))
-                        event_segs.add((centromere, end, 'q', tuple(cns_a1), tuple(ccf_hat_a1), tuple(ccf_high_a1), tuple(ccf_low_a1), 'a1'))
+                        event_segs.add((start, centromere, tuple(bands), 'p', tuple(cns_a1), tuple(ccf_hat_a1), tuple(ccf_high_a1), tuple(ccf_low_a1), 'a1'))
+                        event_segs.add((centromere, end, tuple(bands), 'q', tuple(cns_a1), tuple(ccf_hat_a1), tuple(ccf_high_a1), tuple(ccf_low_a1), 'a1'))
                     elif end < centromere:
-                        event_segs.add((start, end, 'p', tuple(cns_a1), tuple(ccf_hat_a1), tuple(ccf_high_a1), tuple(ccf_low_a1), 'a1'))
+                        event_segs.add((start, end, tuple(bands), 'p', tuple(cns_a1), tuple(ccf_hat_a1), tuple(ccf_high_a1), tuple(ccf_low_a1), 'a1'))
                     else:
-                        event_segs.add((start, end, 'q', tuple(cns_a1), tuple(ccf_hat_a1), tuple(ccf_high_a1), tuple(ccf_low_a1), 'a1'))
+                        event_segs.add((start, end, tuple(bands), 'q', tuple(cns_a1), tuple(ccf_hat_a1), tuple(ccf_high_a1), tuple(ccf_low_a1), 'a1'))
                 else:
-                    logging.warning('Seg with inconsistent event: {}:{}:{}'.format(chrom, seg.begin, seg.end))
+                    logging.warning('Seg with inconsistent event: {}:{}:{}'.format(chrom, start, end))
                 if np.all(cns_a2 == 1):
                     pass
                 elif np.all(cns_a2 >= 1) or np.all(cns_a2 <= 1):
                     if start < centromere < end:
-                        event_segs.add((start, centromere, 'p', tuple(cns_a2), tuple(ccf_hat_a2), tuple(ccf_high_a2), tuple(ccf_low_a2), 'a2'))
-                        event_segs.add((centromere, end, 'q', tuple(cns_a2), tuple(ccf_hat_a2), tuple(ccf_high_a2), tuple(ccf_low_a2), 'a2'))
+                        event_segs.add((start, centromere, tuple(bands), 'p', tuple(cns_a2), tuple(ccf_hat_a2), tuple(ccf_high_a2), tuple(ccf_low_a2), 'a2'))
+                        event_segs.add((centromere, end, tuple(bands), 'q', tuple(cns_a2), tuple(ccf_hat_a2), tuple(ccf_high_a2), tuple(ccf_low_a2), 'a2'))
                     elif end < centromere:
-                        event_segs.add((start, end, 'p', tuple(cns_a2), tuple(ccf_hat_a2), tuple(ccf_high_a2), tuple(ccf_low_a2), 'a2'))
+                        event_segs.add((start, end, tuple(bands), 'p', tuple(cns_a2), tuple(ccf_hat_a2), tuple(ccf_high_a2), tuple(ccf_low_a2), 'a2'))
                     else:
-                        event_segs.add((start, end, 'q', tuple(cns_a2), tuple(ccf_hat_a2), tuple(ccf_high_a2), tuple(ccf_low_a2), 'a2'))
+                        event_segs.add((start, end, tuple(bands), 'q', tuple(cns_a2), tuple(ccf_hat_a2), tuple(ccf_high_a2), tuple(ccf_low_a2), 'a2'))
                 else:
-                    logging.warning('Seg with inconsistent event: {}:{}:{}'.format(chrom, seg.begin, seg.end))
+                    logging.warning('Seg with inconsistent event: {}:{}:{}'.format(chrom, start, end))
             # neighbors = {s: set() for s in event_segs}
             # for seg1, seg2 in itertools.combinations(event_segs, 2):
             #     s1_hat = np.array(seg1[4])
@@ -598,32 +824,31 @@ class Patient:
             # cliques in the undirected graph whose vertices are event_segs
             # and whose edges are defined by neighbors. This has exponential
             # time complexity. Use pivoted version instead!
-            def _BK(P, neighbors, R=frozenset(), X=frozenset()):
-                if not P and not X:
-                    yield R
-                else:
-                    for v in P:
-                        for r in _BK(P & neighbors[v], neighbors, R=R | {v}, X=X & neighbors[v]):
-                            yield r
-                        P = P - {v}
-                        X = X | {v}
+            # def _BK(P, neighbors, R=frozenset(), X=frozenset()):
+            #     if not P and not X:
+            #         yield R
+            #     else:
+            #         for v in P:
+            #             for r in _BK(P & neighbors[v], neighbors, R=R | {v}, X=X & neighbors[v]):
+            #                 yield r
+            #             P = P - {v}
+            #             X = X | {v}
 
             def build_neighbors(segs):
                 G = nx.Graph()
                 G.add_nodes_from(segs)
                 for s1, s2 in itertools.combinations(segs, 2):
-                    s1_hat = np.array(s1[4])
-                    s2_hat = np.array(s2[4])
-                    if (    all(s1_hat >= np.array(s2[6])) and all(s1_hat <= np.array(s2[5]))
-                        and all(s2_hat >= np.array(s1[6])) and all(s2_hat <= np.array(s1[5]))
+                    s1_hat = np.array(s1[5])
+                    s2_hat = np.array(s2[5])
+                    if (    all(s1_hat >= np.array(s2[7])) and all(s1_hat <= np.array(s2[6]))
+                        and all(s2_hat >= np.array(s1[7])) and all(s2_hat <= np.array(s1[6]))
                     ):
                         G.add_edge(s1, s2)
                 return G
 
-            # Group by arm, local_cn, and haplotype (seg[7]) if desired
             buckets = defaultdict(list)
             for seg in event_segs:
-                key = (seg[2], seg[3], seg[7])  # ('p'/'q', local_cn tuple, 'a1'/'a2')
+                key = (seg[3], seg[4], seg[8])  # ('p'/'q', local_cn tuple, 'a1'/'a2')
                 buckets[key].append(seg)
 
             # for clique in _BK(event_segs, neighbors):
@@ -631,30 +856,27 @@ class Patient:
                 G = build_neighbors(segs)
                 for clique in nx.find_cliques(G):
                     if clique:
-                        clique_arm = clique[0][2]
+                        clique_bands = set(clique[0][2])
+                        clique_arm = clique[0][3]
                         arm_len = centromere if clique_arm == 'p' else csize - centromere
-                        clique_len = 0
-                        clique_ccf_hat = np.zeros(n_samples)
-                        clique_ccf_high = np.zeros(n_samples)
-                        clique_ccf_low = np.zeros(n_samples)
-                        n_segs = 0
-                        for seg in clique:
-                            clique_len += seg[1] - seg[0]
-                            clique_ccf_hat += np.array(seg[4])
-                            clique_ccf_high += np.array(seg[5])
-                            clique_ccf_low += np.array(seg[6])
-                            # clique_arm = seg[2]
-                            cn_category = 'Arm_gain' if all(np.array(seg[3]) > 1) else 'Arm_loss'
-                            local_cn = seg[3]
-                            n_segs += 1
+                        n_segs = len(clique)
+                        clique_len = np.sum([seg[1] - seg[0] for seg in clique])
+                        clique_ccf_hat = np.sum([np.array(seg[5]) for seg in clique], axis=0) / n_segs
+                        clique_ccf_high = np.sum([np.array(seg[6]) for seg in clique], axis=0) / n_segs
+                        clique_ccf_low = np.sum([np.array(seg[7]) for seg in clique], axis=0) / n_segs
+                        clique_allele = clique[0][8]
+                        local_cn = clique[0][4]
+                        # cn_category = 'Arm_gain' if all(np.array(local_cn) > 1) else 'Arm_loss'
+                        cn_category = self._infer_cn_category(np.array(local_cn), clique_ccf_hat)
+                        if cn_category is None:
+                            print("[DROPPED]", clique_bands, local_cn, clique_ccf_hat)
+                            continue
+                        cn_category = "Arm_" + cn_category
                         if clique_len < arm_len * .5:
                             continue
-                        clique_ccf_hat /= n_segs
-                        clique_ccf_high /= n_segs
-                        clique_ccf_low /= n_segs
-                        self._add_cn_event_to_samples(chrom, 0, 0, clique_arm, local_cn, cn_category, clique_ccf_hat, clique_ccf_high, clique_ccf_low)
+                        self._add_cn_event_to_samples(chrom, min(clique_bands), max(clique_bands), clique_arm, local_cn, cn_category, clique_ccf_hat, clique_ccf_high, clique_ccf_low, a1=clique_allele == "a1")
 
-    def _add_cn_event_to_samples(self, chrom, start, end, arm, cns, cn_category, ccf_hat, ccf_high, ccf_low):
+    def _add_cn_event_to_samples(self, chrom, start, end, arm, cns, cn_category, ccf_hat, ccf_high, ccf_low, a1=True, dupe=False):
         """
         Adds CN event to sample in low_coverage_mutations attr and mut hashtable
 
@@ -665,7 +887,7 @@ class Patient:
             ccf_high_i = ccf_high[i] if local_cn != 1. else 0.
             ccf_low_i = ccf_low[i] if local_cn != 1. else 0.
             cn = CopyNumberEvent(chrom, cn_category, start=start, end=end, ccf_hat=ccf_hat_i, ccf_high=ccf_high_i, ccf_low=ccf_low_i,
-                                 local_cn=local_cn, from_sample=sample, arm=arm)
+                                 local_cn=local_cn, from_sample=sample, arm=arm, a1=a1, dupe=dupe)
             sample.low_coverage_mutations.update({cn.var_str: cn})
             sample.add_muts_to_hashtable(cn)
 
@@ -725,6 +947,26 @@ class NDHistogram:
     @property
     def mutations(self):
         return {}
+
+
+def get_bands(chrom, start, end, cytoband=os.path.dirname(__file__) + '/supplement_data/cytoBand.txt'):
+    """
+    Gets cytobands hit by a CN event
+    """
+    bands = []
+    on_c = False
+    with open(cytoband, 'r') as f:
+        for line in f:
+            row = line.strip('\n').split('\t')
+            if row[0].strip('chr') != str(chrom):
+                if on_c:
+                    return bands
+                continue
+            if int(row[1]) <= end and int(row[2]) >= start:
+                bands.append(Cytoband(chrom, row[3]))
+                on_c = True
+            if int(row[1]) > end:
+                return bands
 
 
 _cytoband_dict = {}

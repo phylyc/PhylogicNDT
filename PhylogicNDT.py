@@ -119,6 +119,19 @@ def build_parser():
                                 default=False,
                                 help='Interactively select a tree.')
 
+    base_parser.add_argument('--intersect_cn_trees',
+                            action='store_true',
+                            dest='intersect_cn_trees',
+                            default=False,
+                            help='segment/focal-level reconciliation across samples; merges adjacent intervals with similar CCFs; if supplied, ignores cn_peaks input')
+
+    base_parser.add_argument('--cn_peaks',
+                            type=str,
+                            action='store',
+                            dest='gistic_fn',
+                            default=None,
+                            help='interval file with focal amp and del regions specified')
+
     # different Tools of the PhylogicNDT Package
     subparsers = parser.add_subparsers(title="tool", description="Choose a tool to run", dest="tool", help='Try the Cluster tool')
 
@@ -190,13 +203,6 @@ def build_parser():
                             dest='cancer_type',
                             default='All_cancer',
                             help='cancer type -- useful for calling focal events')
-
-    clustering.add_argument('--cn_peaks',
-                            type=str,
-                            action='store',
-                            dest='gistic_fn',
-                            default=None,
-                            help='interval file with focal amp and del regions specified')
 
     clustering.add_argument('--Pi_k_r',
                             type=float,

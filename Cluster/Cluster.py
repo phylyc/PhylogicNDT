@@ -75,7 +75,12 @@ def run_tool(args):
             if len(patient_data.sample_list) == args.n_samples:  # use only first N samples
                 break
 
-    patient_data.get_arm_level_cn_events()
+    if args.intersect_cn_trees:
+        patient_data.intersect_cn_trees()
+    else:
+        patient_data.get_arm_level_cn_events()
+        if args.gistic_fn:
+            patient_data.add_focal_cn_events(focal_regions=args.gistic_fn)
     patient_data.preprocess_samples()
 
     # TODO: how 1D (one sample) is handeled
