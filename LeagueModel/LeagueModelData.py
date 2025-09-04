@@ -95,8 +95,11 @@ class League():
         arm_CNVs.add('gain_' + chrom)
     arm_CNVs.add('WGD')
 
-    def __init__(self,query_res_df,cohort=None,final_event_list=None,keep_only_samples_w_event=None,
-                 remove_samps_w_event=None,keep_samps=None,remove_samps=None,num_games_against_each_opponent=2,final_samples=None):
+    def __init__(
+        self,query_res_df,cohort=None,final_event_list=None,keep_only_samples_w_event=None,
+        remove_samps_w_event=None,keep_samps=None,remove_samps=None,num_games_against_each_opponent=2,final_samples=None,
+        max_num_snvs=20,max_num_cnv_focal=5,max_num_homdel=5,max_num_cnv_arm_losses=15,max_num_cnv_arm_gains=15,max_num_cnv_arms=30,min_event_prevalence=0.05
+    ):
 
         self.query_res_df = query_res_df
         self.seasons = []
@@ -128,7 +131,11 @@ class League():
             self.calc_event_occur(final_event_list=final_event_list)
         else:
             self.calc_event_occur()
-            self.final_event_list = self.get_final_event_list()
+            self.final_event_list = self.get_final_event_list(
+                max_mut=max_num_snvs, max_focal=max_num_cnv_focal, max_homdel=max_num_homdel,
+                num_gains_default=max_num_cnv_arm_gains, num_losses_default=max_num_cnv_arm_losses,
+                max_arm=max_num_cnv_arms, min_prevalence=min_event_prevalence
+            )
         self.form_pairs_for_league_model()
         self.update_pairs_for_league_model()
         self.run_league_model_iter(num_seasons=1000)
@@ -239,10 +246,19 @@ class League():
                 self.event_pairs_per_samp_full[samp] = {}
                 self.num_comp[samp] = {}
 
-            if event1.split("_")[0] in ['loss', 'gain', 'homdel']:event1_gene = "_".join(event1.split("_")[0:2])
-            else:event1_gene = event1.split("_")[0].split(":")[0]
-            if event2.split("_")[0] in ['loss', 'gain', 'homdel']:event2_gene = "_".join(event2.split("_")[0:2])
-            else:event2_gene = event2.split("_")[0].split(":")[0]
+            if event1.split("_")[0] in ['loss', 'gain', 'homdel']:
+                event1_gene = "_".join(event1.split("_")[0:2])
+            elif event1.split("_")[0] in ['Focal']:
+                event1_gene = "_".join(event1.split("_")[1:])
+            else:
+                event1_gene = event1.split("_")[0].split(":")[0]
+
+            if event2.split("_")[0] in ['loss', 'gain', 'homdel']:
+                event2_gene = "_".join(event2.split("_")[0:2])
+            elif event2.split("_")[0] in ['Focal']:
+                event2_gene = "_".join(event2.split("_")[1:])
+            else:
+                event2_gene = event2.split("_")[0].split(":")[0]
 
             self.events_per_samp[samp].add(event1_gene)
             self.events_per_samp[samp].add(event2_gene)
@@ -260,15 +276,23 @@ class League():
             self.num_comp[samp][event1][0] += p_event1_win
             self.num_comp[samp][event2][1] += p_event2_win
 
-            if event1_gene in self.arm_CNVs: self.mut_type[event1_gene] = 'arm_level'
-            elif 'loss' in event1_gene or 'gain' in event1_gene or 'homdel' in event1_gene: self.mut_type[event1_gene] = 'focal_level'
-            elif event1_gene == 'WGD': self.mut_type[event1_gene] = 'WGD'
-            else: self.mut_type[event1_gene] = 'snv'
+            if event1_gene in self.arm_CNVs:
+                self.mut_type[event1_gene] = 'arm_level'
+            elif 'loss' in event1_gene or 'gain' in event1_gene or 'homdel' in event1_gene:
+                self.mut_type[event1_gene] = 'focal_level'
+            elif event1_gene == 'WGD':
+                self.mut_type[event1_gene] = 'WGD'
+            else:
+                self.mut_type[event1_gene] = 'snv'
 
-            if event2_gene in self.arm_CNVs: self.mut_type[event2_gene] = 'arm_level'
-            elif 'loss' in event2_gene or 'gain' in event2_gene or 'homdel' in event2_gene: self.mut_type[event2_gene] = 'focal_level'
-            elif event2_gene == 'WGD': self.mut_type[event2_gene] = 'WGD'
-            else: self.mut_type[event2_gene] = 'snv'
+            if event2_gene in self.arm_CNVs:
+                self.mut_type[event2_gene] = 'arm_level'
+            elif 'loss' in event2_gene or 'gain' in event2_gene or 'homdel' in event2_gene:
+                self.mut_type[event2_gene] = 'focal_level'
+            elif event2_gene == 'WGD':
+                self.mut_type[event2_gene] = 'WGD'
+            else:
+                self.mut_type[event2_gene] = 'snv'
 
     def get_samps_w_event(self,event):
         return [samp for samp in self.events_per_samp.keys() if event in self.events_per_samp[samp]]
@@ -517,7 +541,7 @@ class League():
         for i, rect in enumerate(rects):
             height = rect.get_width()
             label = str(int(height)) if labels is None else str(labels[i])
-            plt.text(height + 1.5, rect.get_xy()[1] + 0.3, str(label), ha='left', va='center', fontsize=10)
+            plt.text(height + 1.5, rect.get_xy()[1] + 0.3, str(label), ha='left', va='center', fontsize=4)
 
     def plot_league_run(self,type='odds'):
 
@@ -559,7 +583,7 @@ class League():
 
         colors_l = ['black'] * len(colors_v)
         if type == 'odds':
-            x_in = np.linspace(np.math.log(1./self.num_seasons,10), np.math.log(self.num_seasons,10), 10000 + 1)
+            x_in = np.linspace(np.log10(1./self.num_seasons), np.log10(self.num_seasons), 10000 + 1)
         elif type == 'pos':
             x_in = np.linspace(1, len(self.final_event_list), 10000 + 1)
 
@@ -567,7 +591,7 @@ class League():
 
             lw = 1
             if type == 'odds':
-                to_plot = -np.log(np.array(self.odds[med[0]]['odds_early']))/np.log(10)
+                to_plot = -np.log10(np.array(self.odds[med[0]]['odds_early']))
             elif type == 'pos':
                 to_plot = self.event_positions[med[0]]
 
@@ -611,12 +635,12 @@ class League():
                   str(len(self.final_event_list)), fontsize=16)
         if type == 'odds':
             plt.xlabel('relative log odds timing', fontsize=16)
-            plt.xlim(np.math.log(1./self.num_seasons,10)-0.1,np.math.log(self.num_seasons,10)+0.1)
+            plt.xlim([np.log10(1./self.num_seasons)-0.1, np.log10(self.num_seasons)+0.1])
         elif type == 'pos':
             plt.xlabel('event position', fontsize=16)
-            plt.xlim(0, len(self.final_event_list)+1)
+            plt.xlim([0, len(self.final_event_list)+1])
         plt.ylabel('event', fontsize=16)
-        plt.ylim(-0.5, len(sorted_medians) - 0.5)
+        plt.ylim([-0.5, len(sorted_medians) - 0.5])
         ax2 = plt.subplot(gs[8:])
         plt.title('prevalence', fontsize=10)
         sns.set_style('white')
@@ -628,7 +652,7 @@ class League():
 
         self.autolabelh(bars, labels)
         plt.axis("off")
-        plt.ylim(-0.5, len(sorted_medians) - 0.5)
+        plt.ylim([-0.5, len(sorted_medians) - 0.5])
 
         if type == 'odds':
             self.odds_plot = odds_plot

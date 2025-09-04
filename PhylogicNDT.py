@@ -529,6 +529,41 @@ def build_parser():
                              dest='num_games_against_each_opponent',
                              default=2,
                              help='number of games each opponent plays against another in a season')
+    leaguemodel.add_argument('--max_num_snvs',
+                             type=int,
+                             action='store',
+                             default=20,
+                             help='maximum number of genes with SNVs')
+    leaguemodel.add_argument('--max_num_cnv_arms',
+                             type=int,
+                             action='store',
+                             default=30,
+                             help='maximum number of arm-level CNV events')
+    leaguemodel.add_argument('--max_num_cnv_arm_gains',
+                             type=int,
+                             action='store',
+                             default=15,
+                             help='maximum number of arm-level CNV gain events')
+    leaguemodel.add_argument('--max_num_cnv_arm_losses',
+                             type=int,
+                             action='store',
+                             default=15,
+                             help='maximum number of arm-level CNV loss events')
+    leaguemodel.add_argument('--max_num_cnv_focal',
+                             type=int,
+                             action='store',
+                             default=5,
+                             help='maximum number of focal CNV events')
+    leaguemodel.add_argument('--max_num_homdel',
+                             type=int,
+                             action='store',
+                             default=5,
+                             help='maximum number of homozygous deletion events')
+    leaguemodel.add_argument('--min_event_prevalence',
+                             type=float,
+                             action='store',
+                             default=0.05,
+                             help='minimum percentage of samples having that event for it to be included in the league model')
     leaguemodel.set_defaults(func=LeagueModel.LeagueModel.run_league_model)
 
     # print help without -h

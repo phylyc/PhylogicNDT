@@ -550,7 +550,7 @@ class Patient:
                     self._add_cn_event_to_samples(chrom, min(bands), max(bands), arm, cns, mut_category, ccf_hat, ccf_high, ccf_low, a1, dupe=not a1)
         self.concordant_cn_tree = c_trees
 
-    def add_focal_cn_events(self, focal_regions, qval_max=None, focal_max_arm_frac=0.3, min_bp_overlap=1000, padding=10000, require_directional_consistency=False, split_across_centromere=True):
+    def add_focal_cn_events(self, focal_regions, qval_max=None, focal_max_arm_frac=0.3, min_bp_overlap=1000, padding=100000, require_directional_consistency=False, split_across_centromere=True):
         """
         Add focal CNV events (e.g., from GISTIC2 peaks) as CopyNumberEvents.
 

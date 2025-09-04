@@ -26,11 +26,21 @@ def run_league_model(args):
         with open(args.final_sample_list, 'r') as final_sample_list_fn:
             for i, row in enumerate(final_sample_list_fn):
                 final_samples.append(row.strip("\n"))
-    league_model_run = LeagueModelData.League(query_res_df1, cohort=args.cohort,
-                                                       keep_only_samples_w_event=args.keep_samps_w_event,
-                                                       remove_samps_w_event=args.remove_samps_w_event,
-                                                       num_games_against_each_opponent=args.num_games_against_each_opponent,
-                                                       final_samples=final_samples)
+    league_model_run = LeagueModelData.League(
+        query_res_df1,
+        cohort=args.cohort,
+        keep_only_samples_w_event=args.keep_samps_w_event,
+        remove_samps_w_event=args.remove_samps_w_event,
+        num_games_against_each_opponent=args.num_games_against_each_opponent,
+        final_samples=final_samples,
+        max_num_snvs=args.max_num_snvs,
+        max_num_cnv_arms=args.max_num_cnv_arms,
+        max_num_cnv_arm_gains=args.max_num_cnv_arm_gains,
+        max_num_cnv_arm_losses=args.max_num_cnv_arm_losses,
+        max_num_cnv_focal=args.max_num_cnv_focal,
+        max_num_homdel=args.max_num_homdel,
+        min_event_prevalence=args.min_event_prevalence
+    )
     output = open(args.cohort + '.all_events.tsv', 'w')
     output.write('indiv\tevent\n')
     for indiv in league_model_run.events_per_samp_full:
@@ -83,11 +93,11 @@ def run_league_model(args):
     league_model_run.plot_league_run(type='odds')
     fig = league_model_run.odds_plot
     plt.savefig(args.cohort + '.log_odds.pdf', transparent=True)
-    plt.savefig(args.cohort + '.log_odds.png')
+    plt.savefig(args.cohort + '.log_odds.png', dpi=300)
     league_model_run.plot_league_run(type='pos')
     fig = league_model_run.pos_plot
     plt.savefig(args.cohort + '.positions.pdf', transparent=True)
-    plt.savefig(args.cohort + '.positions.png')
+    plt.savefig(args.cohort + '.positions.png', dpi=300)
 
     ## output ##
     out_fn = args.cohort + '.prevalence.tsv'
