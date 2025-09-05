@@ -1,5 +1,6 @@
 import logging
 import numpy as np
+import pandas as pd
 import itertools
 from data.Patient import Patient
 from SinglePatientTiming import TimingEngine
@@ -14,18 +15,19 @@ def run_tool(args):
                            driver_genes_file=args.driver_genes_file)
 
     if args.sif:  # if sif file is specified
-        with open(args.sif, 'r') as sif_file:
-            header = sif_file.readline().strip('\n').split('\t')
-            for line in sif_file:
-                row = dict(zip(header, line.strip('\n').split('\t')))
-                sample_id = row['sample_id']
-                maf_fn = row['maf_fn']
-                seg_fn = row['seg_fn']
-                purity = float(row['purity'])
-                timepoint = float(row['timepoint'])
-                patient_data.addSample(maf_fn, sample_id, input_type='post-clustering', #seg_input_type='timing_format',
-                                       timepoint_value=timepoint, grid_size=101, _additional_muts=None, seg_file=seg_fn,
-                                       purity=purity)
+        sif = pd.read_csv(args.sif, sep="\t")
+        for _, row in sif.iterrows():
+            patient_data.addSample(
+                row['maf_fn'],
+                row['sample_id'],
+                input_type='post-clustering',
+                # seg_input_type='timing_format',
+                timepoint_value=row['timepoint'],
+                grid_size=args.grid_size,
+                _additional_muts=None,
+                seg_file=row['seg_fn'],
+                purity=row['purity']
+            )
 
     else:  # if sample names/files are specified directly on cmdline
 
@@ -40,7 +42,7 @@ def run_tool(args):
             purity = float(smpl_spec[3])
             timepoint = float(smpl_spec[4])
 
-            patient_data.addSample(maf_fn, sample_id, input_type='post-clustering', seg_input_type='timing_format',
+            patient_data.addSample(maf_fn, sample_id, input_type='post-clustering', # seg_input_type='timing_format',
                                    timepoint_value=timepoint, grid_size=args.grid_size,
                                    _additional_muts=None, seg_file=seg_fn, purity=purity)
 

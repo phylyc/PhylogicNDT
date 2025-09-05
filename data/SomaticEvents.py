@@ -272,6 +272,7 @@ class CopyNumberEvent():
                     self.ccf_1d /= sum(self.ccf_1d)
         self.seg_tree = seg_tree
         self.clust_ccf = clust_ccf
+        self._ccf_grid = np.linspace(0.0, 1.0, len(self.ccf_1d), dtype=float)
 
         self.type = 'CNV'
 
@@ -319,6 +320,16 @@ class CopyNumberEvent():
     @property
     def var_str(self):
         return self._var_str
+
+    @property
+    def ccf_hat(self):
+        return float(np.dot(self.ccf_1d, self._ccf_grid))
+
+    @property
+    def ccf_median(self):
+        cdf = np.cumsum(self.ccf_1d)
+        idx = int(np.searchsorted(cdf, 0.5))
+        return float(self._ccf_grid[idx])
 
     # def set_mut_category(self, mut_category, arm=None,
     #                      cytoband=os.path.dirname(__file__) + '/supplement_data/cytoBand.txt'):

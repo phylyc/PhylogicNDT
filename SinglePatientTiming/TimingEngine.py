@@ -1,4 +1,4 @@
-from collections import Counter
+from collections import Counter, defaultdict
 import numpy as np
 import itertools
 from intervaltree import IntervalTree, Interval
@@ -197,6 +197,7 @@ class TimingEngine(object):
 
         # --- cytoband cache: (chrom, band_name) -> (start_bp, end_bp)
         _band_index = {}
+        _bands_by_chr = {}
         _band_index_ready = False
 
         def _ensure_band_index():
@@ -211,9 +212,15 @@ class TimingEngine(object):
                     for ln in f:
                         chrom, start, end, band, *_ = ln.strip().split('\t')
                         _band_index[(chrom.lstrip('chr'), band)] = (int(start), int(end))
+                # build per-chrom sorted lists for bp→band lookup
+                tmp = defaultdict(list)
+                for (c, b), (s, e) in _band_index.items():
+                    tmp[c].append((s, e, b))
+                for c in tmp:
+                    _bands_by_chr[c] = sorted(tmp[c], key=lambda t: t[0])
                 _band_index_ready = True
             except Exception as e:
-                print(f'Could not load cytoBand.txt for band→bp conversion: {e}')
+                print(f'Could not load cytoBand.txt for band to bp conversion: {e}')
                 _band_index_ready = True  # avoid retry storms
 
         def _band_to_bp(chrom, band_obj):
@@ -223,6 +230,23 @@ class TimingEngine(object):
             name = getattr(band_obj, 'band', None) or str(band_obj)
             _ensure_band_index()
             return _band_index.get((str(chrom).lstrip('chr'), name))
+
+        def _band_at_bp(chrom, pos):
+            arr = _bands_by_chr.get(str(chrom).lstrip('chr'))
+            if not arr:
+                return None
+            for s, e, b in arr:
+                if s <= pos < e:
+                    return b
+            return None
+
+        def _band_range_str(chrom, s_bp, e_bp):
+            # inclusive range label using bands at start and end-1
+            b1 = _band_at_bp(chrom, s_bp)
+            b2 = _band_at_bp(chrom, max(s_bp, e_bp - 1))
+            if not b1 or not b2:
+                return None
+            return b1 if b1 == b2 else f'{b1}-{b2}'
 
         def _coords(chrom, start, end):
             """
@@ -251,8 +275,7 @@ class TimingEngine(object):
                     s_bp, e_bp = bounds
                     key = (str(cn.chrN), s_bp, e_bp, cn.arm, cn.a1, cn.cn_category)
                     rec = groups.setdefault(key, {'ccf': np.zeros(n_samples), 'cn_pairs': [None]*n_samples, 'seg_bounds': []})
-                    rec['ccf'][si] = cn.clust_ccf
-                    # segment with max overlap -> (cn_a1, cn_a2)
+                    rec['ccf'][si] = cn.ccf_hat
                     cn_a1 = np.nan
                     cn_a2 = np.nan
                     try:
@@ -260,7 +283,19 @@ class TimingEngine(object):
                     except Exception:
                         ov = []
                     if ov:
-                        best = max(ov, key=lambda iv: max(0, min(iv.end, int(e_bp)) - max(iv.begin, int(s_bp))))
+                        def _ovlen(iv):
+                            return max(0, min(iv.end, e_bp) - max(iv.begin, s_bp))
+
+                        def _totcn(iv):
+                            seg = iv.data[1]
+                            return seg['cn_a1'] + seg['cn_a2']
+
+                        is_amp = ('gain' in cn.cn_category.lower()) or ('amp' in cn.cn_category.lower())
+                        # prefer extreme total CN; break ties by larger overlap
+                        if is_amp:
+                            best = max(ov, key=lambda iv: (_totcn(iv), _ovlen(iv)))
+                        else:
+                            best = min(ov, key=lambda iv: (_totcn(iv), -_ovlen(iv)))
                         seg = best.data[1]
                         cn_a1 = float(seg['cn_a1'])
                         cn_a2 = float(seg['cn_a2'])
@@ -293,12 +328,25 @@ class TimingEngine(object):
                 sup_end = max(e for _, e in rec['seg_bounds'])
             else:
                 sup_start, sup_end = start, end
+            # IMPORTANT: match SNVs to the *per-sample* CN pair, not the cross-sample consensus
             supporting_muts = []
-            for ts in self.sample_list:
-                for iv in ts.mutation_intervaltree.get(chrom, IntervalTree())[sup_start:sup_end]:
-                    mut = iv.data  # TimingMut
-                    if (mut.local_cn_a1 == cn_state[0]).all() and (mut.local_cn_a2 == cn_state[1]).all():
+            for si, ts in enumerate(self.sample_list):
+                samp_pair = rec['cn_pairs'][si]
+                if not samp_pair or any(map(lambda x: x is None or np.isnan(x), samp_pair)):
+                    continue
+                a1_req, a2_req = samp_pair
+                tree = ts.mutation_intervaltree.get(chrom, IntervalTree())
+                for iv in tree[sup_start:sup_end]:
+                    mut = iv.data  # TimingMut (this sample)
+                    # mut.local_cn_a1 / a2 are per-sample scalars here
+                    if float(mut.local_cn_a1) == a1_req and float(mut.local_cn_a2) == a2_req:
                         supporting_muts.append(mut)
+            # supporting_muts = []
+            # for ts in self.sample_list:
+            #     for iv in ts.mutation_intervaltree.get(chrom, IntervalTree())[sup_start:sup_end]:
+            #         mut = iv.data  # TimingMut
+            #         if (mut.local_cn_a1 == cn_state[0]).all() and (mut.local_cn_a2 == cn_state[1]).all():
+            #             supporting_muts.append(mut)
             purity = [s.purity for s in self.sample_list]
             state = TimingCNState(self.sample_list, chrom, arm, cn_state, purity, supporting_muts=supporting_muts)
             state.call_events(cn_type_prefix='Focal', wgd=(self.WGD is not None))
@@ -313,6 +361,8 @@ class TimingEngine(object):
             # make it uniquely identifiable
             eve.start = int(start)
             eve.end = int(end)
+            # set cytoband-based label for naming
+            eve.band_range_str = _band_range_str(chrom, int(start), int(end))
             # focal-specific fallback: if low evidence, avoid collapsing to "after everything"
             if len(supporting_muts) < self.min_supporting_muts:
                 eve.pi_dist = np.ones(101, dtype=float) / 101
@@ -322,7 +372,8 @@ class TimingEngine(object):
             is_clonal = True
             for c, grid in cluster_ccfs.items():
                 if np.prod(grid[sample_idx, ccf_idx]) > clonal_conc:
-                    is_clonal = False; break
+                    is_clonal = False
+                    break
             eve.is_clonal = is_clonal
             self.all_cn_events.setdefault(eve.event_name, []).append(eve)
             if is_clonal:
@@ -652,7 +703,7 @@ class TimingCNState(object):
 class TimingCNEvent(object):
     def __init__(self, sample_list, state, Type=None, chrN=None, arm=None, pi_dist=None, copy_number=None,
                  allelic_cn=None, supporting_muts=None, is_clonal=None, cluster_id=None,
-                 cn_state_whitelist=_cn_state_whitelist, ccf_hat=None, start=None, end=None):
+                 cn_state_whitelist=_cn_state_whitelist, ccf_hat=None, start=None, end=None, band_range_str=None):
         self.sample_list = sample_list
         self.state = state
         self.Type = Type
@@ -672,11 +723,13 @@ class TimingCNEvent(object):
         self.ccf_hat = ccf_hat
         self.start = start
         self.end = end
+        self.band_range_str = band_range_str
 
 
     def __repr__(self):
         if self.Type.startswith('Focal_') and self.start is not None and self.end is not None:
-            return '<TimingCNEvent object: {}_{}{}:{}-{}>'.format(self.Type, self.chrN, self.arm, self.start, self.end)
+            # return '<TimingCNEvent object: {}_{}{}:{}-{}>'.format(self.Type, self.chrN, self.arm, self.start, self.end)
+            return '<TimingCNEvent object: {}_{}{}.{}>'.format(self.Type, self.chrN, self.arm, self.band_range_str)
         return '<TimingCNEvent object: {}_{}{}>'.format(self.Type, self.chrN, self.arm)
 
     @property
@@ -684,10 +737,13 @@ class TimingCNEvent(object):
         if self.Type.startswith('Arm_'):
             return self.Type[4:] + '_' + self.chrN + self.arm
         if self.Type.startswith('Focal_'):
-            # e.g., Focal_gain_17q:37000000-37800000 (unique per window)
-            coord = (f'{self.chrN}{self.arm}:{self.start}-{self.end}'
-                     if self.start is not None and self.end is not None
-                     else f'{self.chrN}{self.arm}')
+            # Prefer cytoband naming if available; else fall back to coordinates
+            if self.band_range_str is not None:
+                coord = f'{self.chrN}{self.arm}.{self.band_range_str}'
+            else:
+                coord = (f'{self.chrN}{self.arm}:{self.start}-{self.end}'
+                         if self.start is not None and self.end is not None
+                         else f'{self.chrN}{self.arm}')
             return f'{self.Type}_{coord}'
         raise NotImplementedError('ONLY ARM AND FOCAL EVENTS CURRENTLY SUPPORTED')
 
@@ -921,7 +977,9 @@ class TimingMut(object):
         p2 distribution for an individual mutation
         """
         mult_dist = np.linspace(self.mult_lik_dict[1], self.mult_lik_dict[2], 101)
-        return np.log(mult_dist / np.sum(mult_dist, 0))
+        probs = mult_dist / np.sum(mult_dist, axis=0)
+        probs = np.clip(probs, 1e-300, None)
+        return np.log(probs)
 
     def get_pi_dist(self, matched_gain):
         """
@@ -942,8 +1000,7 @@ class TimingMut(object):
         if cn_a1 == 0. and cn_a2 >= 2. or cn_a1 == cn_a2 != 1.:
             max_cn = int(cn_a2)
             lik_before_gain = sum(self.mult_lik_dict[i] * i / max_cn for i in range(2, max_cn + 1))
-            lik_after_gain = sum(self.mult_lik_dict[i] * (max_cn - i) / max_cn for i in range(2, max_cn)) \
-                + self.mult_lik_dict[1]
+            lik_after_gain = sum(self.mult_lik_dict[i] * (max_cn - i) / max_cn for i in range(2, max_cn)) + self.mult_lik_dict[1]
         elif cn_a1 == 1. and cn_a2 >= 2.:
             max_cn = int(cn_a2)
             lik_before_gain = sum(self.mult_lik_dict[i] * i / max_cn for i in range(1, max_cn + 1))

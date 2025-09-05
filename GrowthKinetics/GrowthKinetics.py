@@ -1,4 +1,5 @@
 import logging
+import gzip
 from collections import defaultdict
 
 
@@ -38,7 +39,8 @@ def run_tool(args):
 def load_mcmc_trace_abundances(in_file):
     iterations = set()
     cell_abundance_mcmc_trace = defaultdict(lambda: defaultdict(list))
-    with open(in_file, 'r') as reader:
+    open_func = gzip.open if in_file.endswith(".gz") else open
+    with open_func(in_file, 'rt') as reader:
         for line in reader:
             values = line.strip('\n').split('\t')
             if line.startswith('Patient_ID'):

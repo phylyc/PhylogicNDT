@@ -380,9 +380,8 @@ class League():
             final_event_list.append(eve)
 
         # then, add snvs/indels
-        for i,(eve,n_occur) in enumerate(sorted([x for x in self.event_prev.items()
-                                                 if self.mut_type[x[0]] in ['snv']],
-                                                key = lambda y:y[1],reverse=True)):
+        snv_indel = sorted([x for x in self.event_prev.items() if self.mut_type[x[0]] in ['snv']], key = lambda y:y[1], reverse=True)
+        for i,(eve,n_occur) in enumerate(snv_indel):
             if i >= max_mut: break
             if n_occur/float(self.n_samps) < min_prevalence: break
             final_event_list.append(eve)
@@ -632,14 +631,14 @@ class League():
                             fontsize=15. * 35 / max(30, len(self.final_event_list)))
         for ytick, color in zip(ax0.get_yticklabels(), colors_l): ytick.set_color(color)
         plt.title(self.cohort + ', N(samp) = ' + str(self.full_n_samps)+', N(events) = ' +
-                  str(len(self.final_event_list)), fontsize=16)
+                  str(len(self.final_event_list)), fontsize=12)
         if type == 'odds':
-            plt.xlabel('relative log odds timing', fontsize=16)
+            plt.xlabel('relative log odds timing', fontsize=12)
             plt.xlim([np.log10(1./self.num_seasons)-0.1, np.log10(self.num_seasons)+0.1])
         elif type == 'pos':
-            plt.xlabel('event position', fontsize=16)
+            plt.xlabel('event position', fontsize=12)
             plt.xlim([0, len(self.final_event_list)+1])
-        plt.ylabel('event', fontsize=16)
+        plt.ylabel('event', fontsize=12)
         plt.ylim([-0.5, len(sorted_medians) - 0.5])
         ax2 = plt.subplot(gs[8:])
         plt.title('prevalence', fontsize=10)
@@ -651,6 +650,7 @@ class League():
              sorted_medians][i] / float(self.full_n_samps), 2) * 100)) + "%" for i in range(len(sorted_medians))]
 
         self.autolabelh(bars, labels)
+        sns.despine(ax=ax0)
         plt.axis("off")
         plt.ylim([-0.5, len(sorted_medians) - 0.5])
 

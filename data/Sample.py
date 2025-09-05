@@ -4,6 +4,7 @@ Sample class to load and store data for each sample of the individual
 
 import os
 import sys
+import gzip
 import logging
 import collections
 import numpy as np
@@ -211,7 +212,8 @@ class TumorSample:
     def _read_post_clustering_results(self, filen):
         mutation_list = []
         ccf_headers = ['preDP_ccf_' + str(i / 100.0) for i in range(0, 101, 1)]
-        with open(filen, 'r') as reader:
+        open_func = gzip.open if filen.endswith(".gz") else open
+        with open_func(filen, 'rt') as reader:
             for line in reader:
                 values = line.strip().split('\t')
                 if line.startswith('Patient_ID'):
@@ -256,7 +258,7 @@ class TumorSample:
         # _only_x parameter is to load chrX mutations from a different data source. Avoid this unless you know you need it.
 
         # allow buffers.
-        file_in = open(filen) if type(filen) == str else filen
+        file_in = (gzip.open(filen, mode="rt") if filen.endswith(".gz") else open(filen)) if type(filen) == str else filen
 
         header = file_in.readline()
         while header[0] == "#" or not header.strip():
@@ -393,7 +395,7 @@ class TumorSample:
     @staticmethod
     def _auto_file_type(filen):
         file_extension = os.path.splitext(filen)[1]
-        if file_extension in ['.txt', '.tab', '.tsv', '.maf']:
+        if file_extension in ['.txt', '.tab', '.tsv', '.maf', '.gz']:
             return 'tab'
         elif file_extension == '.RData':
             return 'absolute'
@@ -412,7 +414,7 @@ class TumorSample:
         if input_type == 'auto':
             if not seg_file:
                 input_type = 'none'
-            elif seg_file.endswith('.txt') and "segtab" in seg_file:
+            elif seg_file.endswith(('.txt', '.txt.gz')) and "segtab" in seg_file:
                 input_type = 'absolute'
             elif seg_file.endswith('.tsv'):
                 input_type = 'alleliccapseg'
@@ -425,7 +427,8 @@ class TumorSample:
             return None
         elif input_type == 'absolute':
             print('Warning: using ABSOLUTE seg file')
-            with open(seg_file, 'r') as fh:
+            open_func = gzip.open if seg_file.endswith(".gz") else open
+            with open_func(seg_file, 'rt') as fh:
                 header = fh.readline().strip('\n').split('\t')
                 for line in fh:
                     try:
