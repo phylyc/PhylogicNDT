@@ -318,6 +318,12 @@ class TimingEngine(object):
                 vals.append((a1r, a2r))
             return Counter(vals).most_common(1)[0][0] if vals else None
 
+        # compare up to ordering and small rounding error
+        def _pair_match(m_a1, m_a2, r_a1, r_a2, tol=0.25):
+            x = sorted([float(m_a1), float(m_a2)])
+            y = sorted([float(r_a1), float(r_a2)])
+            return abs(x[0] - y[0]) <= tol and abs(x[1] - y[1]) <= tol
+
         for (chrom, start, end, arm, is_a1, category), rec in groups.items():
             cn_state = consensus_pair(rec['cn_pairs'])
             if cn_state is None:
@@ -339,14 +345,9 @@ class TimingEngine(object):
                 for iv in tree[sup_start:sup_end]:
                     mut = iv.data  # TimingMut (this sample)
                     # mut.local_cn_a1 / a2 are per-sample scalars here
-                    if float(mut.local_cn_a1) == a1_req and float(mut.local_cn_a2) == a2_req:
+                    # if float(mut.local_cn_a1) == a1_req and float(mut.local_cn_a2) == a2_req:
+                    if _pair_match(mut.local_cn_a1, mut.local_cn_a2, a1_req, a2_req):
                         supporting_muts.append(mut)
-            # supporting_muts = []
-            # for ts in self.sample_list:
-            #     for iv in ts.mutation_intervaltree.get(chrom, IntervalTree())[sup_start:sup_end]:
-            #         mut = iv.data  # TimingMut
-            #         if (mut.local_cn_a1 == cn_state[0]).all() and (mut.local_cn_a2 == cn_state[1]).all():
-            #             supporting_muts.append(mut)
             purity = [s.purity for s in self.sample_list]
             state = TimingCNState(self.sample_list, chrom, arm, cn_state, purity, supporting_muts=supporting_muts)
             state.call_events(cn_type_prefix='Focal', wgd=(self.WGD is not None))
@@ -358,14 +359,32 @@ class TimingEngine(object):
                     break
             if eve is None:
                 continue
-            # make it uniquely identifiable
             eve.start = int(start)
             eve.end = int(end)
-            # set cytoband-based label for naming
-            eve.band_range_str = _band_range_str(chrom, int(start), int(end))
+            is_amp = ('gain' in category.lower()) or ('amp' in category.lower())
+            # borrow SNV CCF evidence from other AMP events with same CN state on same arm
+            if len(supporting_muts) < self.min_supporting_muts and is_amp:
+                borrowed = []
+                # collect from arm region with the same (per-sample) CN pair
+                for si, ts in enumerate(self.sample_list):
+                    pair = rec['cn_pairs'][si]
+                    if not pair:
+                        continue
+                    arm_start = 0 if arm=='p' else CENT_LOOKUP[chrom]
+                    arm_end   = CENT_LOOKUP[chrom] if arm=='p' else CSIZE[chrom]
+                    for iv in ts.mutation_intervaltree.get(chrom, IntervalTree())[arm_start:arm_end]:
+                        mut = iv.data
+                        if _pair_match(mut.local_cn_a1, mut.local_cn_a2, *pair):
+                            borrowed.append(mut)
+                            if len(borrowed) >= self.min_supporting_muts:
+                                break
+                supporting_muts.extend(borrowed)
+
             # focal-specific fallback: if low evidence, avoid collapsing to "after everything"
             if len(supporting_muts) < self.min_supporting_muts:
                 eve.pi_dist = np.ones(101, dtype=float) / 101
+            # set cytoband-based label for naming
+            eve.band_range_str = _band_range_str(chrom, int(start), int(end))
             # clonality from focal ccf_hat vector
             ccf_idx = np.rint(np.clip(np.nan_to_num(np.asarray(rec['ccf'], float), nan=0.0, posinf=1.0, neginf=0.0),0.0, 1.0) * 100).astype(int)
             clonal_conc = np.prod(cluster_ccfs.get(1, np.ones((n_samples, 101)))[sample_idx, ccf_idx])
@@ -412,12 +431,15 @@ class TimingEngine(object):
                     elif cn_event.Type.endswith('loss'):
                         cn_event.get_pi_dist_for_loss(self.WGD)
         else:
-            for cn_event_name in self.all_cn_events:
-                for cn_event in self.all_cn_events[cn_event_name]:
+            for cn_event_name, evs in self.all_cn_events.items():
+                for cn_event in evs:
+                    is_focal_gain = cn_event.Type.startswith('Focal_gain')
+                    have_support = len(cn_event.supporting_muts) >= self.min_supporting_muts
+                    state_ok = ((cn_event.cn_a1, cn_event.cn_a2) in self.cn_state_whitelist)
                     if not cn_event.is_clonal:
-                        cn_event.pi_dist = subclonal_dist
-                    elif cn_event.Type.endswith('gain') and len(cn_event.supporting_muts) >= self.min_supporting_muts \
-                            and (cn_event.cn_a1, cn_event.cn_a2) in self.cn_state_whitelist:
+                        # focal amp events with weak clonality get uninformative, not "always-after"
+                        cn_event.pi_dist = uniform_dist if is_focal_gain else subclonal_dist
+                    elif "gain" in cn_event.Type and have_support and state_ok:
                         cn_event.get_pi_dist_for_gain()
                         for mut in cn_event.supporting_muts:
                             if mut.is_clonal:
@@ -847,7 +869,7 @@ class TimingCNEvent(object):
             for mut in muts_list:
                 coverage = mut.ref_cnt + mut.alt_cnt
                 if hasattr(coverage, '__iter__'):
-                    coverage_list.append(coverage.astype(int))
+                    coverage_list.append(np.asarray(coverage, dtype=int))
                 else:
                     coverage_list.append(int(coverage))
         purity = np.array(self.state.purity)
@@ -857,10 +879,11 @@ class TimingCNEvent(object):
             n_detected_by_mult = {1: 0., 2: 0.}
             for i in range(n_iter):
                 cov = coverage_list[i]
+                cov = np.asarray(cov, dtype=float)
                 mult = 1 if i < n_m1_muts else 2
                 expected_af = mult * purity / (2 * (1 - purity) + self.total_cn * purity)
-                alt_count = np.random.binomial(cov, expected_af).astype(float)
-                af_mode = alt_count / cov
+                alt_count = np.random.binomial(cov.astype(int), expected_af).astype(float)
+                af_mode = np.divide(alt_count, cov, out=np.zeros_like(alt_count, dtype=float), where=(cov > 0))
                 ccf_mode = af_mode * (2 * (1 - purity) + purity * self.total_cn) / purity
                 if all(ccf_mode >= .86) and all(alt_count >= 3):
                     n_detected_by_mult[mult] += 1.
@@ -976,9 +999,15 @@ class TimingMut(object):
         """
         p2 distribution for an individual mutation
         """
-        mult_dist = np.linspace(self.mult_lik_dict[1], self.mult_lik_dict[2], 101)
-        probs = mult_dist / np.sum(mult_dist, axis=0)
-        probs = np.clip(probs, 1e-300, None)
+        mult = np.linspace(self.mult_lik_dict[1], self.mult_lik_dict[2], 101)
+        mult = np.nan_to_num(mult, nan=0.0, posinf=0.0, neginf=0.0)
+        colsum = mult.sum(axis=0)
+        probs = np.empty_like(mult)
+        # normalize columns with mass; assume uniform for empty columns
+        ok = np.isfinite(colsum) & (colsum > 0)
+        probs[:, ok] = mult[:, ok] / colsum[ok]
+        probs[:, ~ok] = 1.0 / mult.shape[0]
+        probs = np.clip(probs, 1e-300, 1.0)
         return np.log(probs)
 
     def get_pi_dist(self, matched_gain):

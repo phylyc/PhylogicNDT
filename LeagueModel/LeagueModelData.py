@@ -650,9 +650,10 @@ class League():
              sorted_medians][i] / float(self.full_n_samps), 2) * 100)) + "%" for i in range(len(sorted_medians))]
 
         self.autolabelh(bars, labels)
-        sns.despine(ax=ax0)
+        sns.despine(ax=ax0, left=True, bottom=True)
         plt.axis("off")
         plt.ylim([-0.5, len(sorted_medians) - 0.5])
+        plt.tight_layout()
 
         if type == 'odds':
             self.odds_plot = odds_plot
