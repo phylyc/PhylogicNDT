@@ -568,7 +568,14 @@ class PhylogicOutput(object):
                 if node in pie_slices:
                     x.append(pie_slices[node])
                     colors.append(ClusterColors.get_hex_string(node.identifier))
-            ax.pie(x, colors=colors, radius=.9-(.1*level))
+            
+            # Non-negative wedge size
+            x = [max(0.0, v) for v in x]
+
+            # Radius must be positive number
+            r = max(0.00001, 0.9 - 0.1*level) 
+            ax.pie(x, colors=colors, radius=r)
+
         ax.set_axis_off()
         plt.subplots_adjust(top=1, bottom=0, right=1, left=0, hspace=0, wspace=0)
         plt.margins(0, 0)
