@@ -271,10 +271,12 @@ class Tree:
         return max_ + np.log(sumOfExp)
 
     def normalize_in_logspace(self, dist, in_log_space=True):
+        eps = 1e-12  # small constant to avoid log(0)
         if in_log_space:
             log_dist = np.array(dist, dtype=np.float64)
         else:
-            log_dist = np.log(dist, dtype=np.float64)
+            log_dist = np.log(np.array(dist, dtype=np.float64) + eps)
+
         return np.exp(log_dist - self.logSumExp(log_dist))
 
     @staticmethod
