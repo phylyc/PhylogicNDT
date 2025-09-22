@@ -121,6 +121,8 @@ class BuildTreeEngine:
                 logging.debug('Node to move {}'.format(node_to_move.identifier))
                 # List of all possible Trees and corresponding likelihoods
                 tree_choices, tree_choice_lik = tree.get_all_possible_moves(node_to_move, time_points)
+                # Normalize to avoid probability distribution going over 1.0
+                tree_choice_lik = tree_choice_lik / np.sum(tree_choice_lik)
                 tree_idx = np.argmax(np.random.multinomial(1, tree_choice_lik))
                 logging.debug('np.argmax(np.random.multinomial(1, tree_choice_lik)) = {}'.format(tree_idx))
                 tree_edges_selected = tree_choices[tree_idx]
