@@ -1036,7 +1036,7 @@ class TimingMut(object):
             lik_after_gain = sum(self.mult_lik_dict[i] * (max_cn - i) / max_cn for i in range(1, max_cn))
         else:
             return
-        total_lik = lik_before_gain + lik_after_gain
+        total_lik = lik_before_gain + lik_after_gain + 1e-12 # Add small episilon to avoid division by zero
         p_before_gain = lik_before_gain / total_lik
         p_after_gain = lik_after_gain / total_lik
         pi_cdf = np.cumsum(matched_gain.pi_dist)
