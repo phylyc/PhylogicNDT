@@ -11,7 +11,7 @@ def run_tool(args):
     import output.PhylogicOutput
 
     # init a Patient
-    patient_data = Patient.Patient(indiv_name=args.indiv_id, driver_genes_file=args.driver_genes_file)
+    patient_data = Patient.Patient(indiv_name=args.indiv_id, driver_genes_file=args.driver_genes_file, genome_build=args.genome_build)
 
     # Patient load cluster and mut ccf files
     parse_sif_file(args.sif, args.mutation_ccf_file, patient_data)

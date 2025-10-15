@@ -12,6 +12,7 @@ from intervaltree import Interval, IntervalTree
 
 from scipy.interpolate import interp1d
 
+from data.Enums import Genome
 from data.SomaticEvents import SomMutation, CopyNumberEvent
 
 from utils.calc_ccf import calc_ccf as calc_ccf_
@@ -62,7 +63,8 @@ class TumorSample:
                  purity=None,
                  timepoint_value=None,
                  tmb=None,
-                 seg_input_type='auto'):
+                 seg_input_type='auto',
+                 genome=Genome()):
 
         # Reference to Patient object
         self.indiv = indiv
@@ -94,7 +96,7 @@ class TumorSample:
                                                use_indels=use_indels,
                                                _additional_muts=_additional_muts)  # a list of SomMutation objects
 
-        self.CnProfile = self._resolve_CnEvents(seg_file, input_type=seg_input_type)
+        self.CnProfile = self._resolve_CnEvents(seg_file, input_type=seg_input_type, chroms=genome.CHROMS)
 
         self.ClustersPostMarginal = None  # format F[Cluster] = CCF post hist
 
@@ -410,7 +412,7 @@ class TumorSample:
         else:
             self._mut_varstring_hashtable[muts.var_str] = muts
 
-    def _resolve_CnEvents(self, seg_file, input_type='auto', purity=1, ploidy=2):
+    def _resolve_CnEvents(self, seg_file, input_type='auto', purity=1, ploidy=2, chroms=tuple(list(map(str, range(1, 23))) + ['X', 'Y'])):
         if input_type == 'auto':
             if not seg_file:
                 input_type = 'none'
@@ -421,7 +423,7 @@ class TumorSample:
             else:
                 input_type = 'moo'
 
-        seg_tree = {chrom: IntervalTree() for chrom in list(map(str, range(1, 23))) + ['X', 'Y']}
+        seg_tree = {chrom: IntervalTree() for chrom in chroms}
 
         if input_type == 'none':
             return None

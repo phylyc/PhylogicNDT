@@ -457,23 +457,9 @@ class CN_SegProfile:
             @property methods: none
     """
 
-    # csize contains chromosome bp lengths
-    CSIZE = [0, 249250621, 243199373, 198022430, 191154276, 180915260, 171115067, 159138663, 146364022, 141213431,
-             135534747, 135006516, 133851895, 115169878, 107349540, 102531392, 90354753, 81195210, 78077248, 59128983,
-             63025520, 48129895, 51304566, 156040895, 57227415]
-
-    # centromeres (define arm-level lengths)
-    CENT_LOOKUP = {1: 125000000, 2: 93300000, 3: 91000000, 4: 50400000, 5: 48400000,
-                   6: 61000000, 7: 59900000, 8: 45600000, 9: 49000000, 10: 40200000,
-                   11: 53700000, 12: 35800000, 13: 17900000, 14: 17600000, 15: 19000000,
-                   16: 36600000, 17: 24000000, 18: 17200000, 19: 26500000, 20: 27500000, 21: 13200000,
-                   22: 14700000, 23: 60600000, 24: 12500000}
-
     def __init__(self, seg_file, input_type='auto', from_sample=None):
         # try: # validate correct input
-        self.chroms = list(map(str, range(1, 23)))
-        self.chroms.append('X')
-        self.chroms.append('Y')
+        self.chroms = list(map(str, range(1, 23))) + ['X', 'Y']
         self.from_sample = from_sample  # from_sample can be an Object, and potential to get purity from this
         logging.debug('reading in :' + seg_file)
         if input_type == 'auto':
@@ -482,7 +468,8 @@ class CN_SegProfile:
         else:
             seg_file_type = input_type
         self.seg_tree = {x: IntervalTree() for x in self.chroms}
-        if seg_file_type in ['tab', 'absolute', 'sqlite']: self._load_segs(seg_file, seg_file_type)
+        if seg_file_type in ['tab', 'absolute', 'sqlite']:
+            self._load_segs(seg_file, seg_file_type)
         logging.debug(self.seg_tree)
         ## overwrite merged_seg_tree with normal seg tree (raw seg tree)
         self.merged_seg_tree = self.seg_tree
@@ -496,12 +483,16 @@ class CN_SegProfile:
 
     def chrom2int(self, chrom):
         try:
+            if isinstance(chrom, str):
+                return int(chrom.removeprefix("chr"))
             return int(chrom)
         except:
-            if chrom == 'X':
+            if "X" in chrom:
                 return 23
-            else:
+            elif "Y" in chrom:
                 return 24
+            else:
+                return 25
 
     # =======input file readers=======#
     def _auto_file_type(self, seg_file):  # func private to the class
@@ -556,12 +547,8 @@ class CN_SegProfile:
     def _results_from_seg_file(self, seg_file, header_indeces, file_type):
 
         seg_tree = {}
-        for chrom in map(str, CN_SegProfile.CENT_LOOKUP.keys()):
-            if chrom == '23': seg_tree['X'] = IntervalTree()
-            if chrom == '24':
-                seg_tree['Y'] = IntervalTree()
-            else:
-                seg_tree[chrom] = IntervalTree()
+        for chrom in self.chroms:
+            seg_tree[chrom] = IntervalTree()
         if file_type == "PCAWG_consensus":
             use_star = True
             [chrom_idx, a1_idx, a2_idx, sigma_idx, start_idx, end_idx, broad_major_cn_idx,

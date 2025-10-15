@@ -4,7 +4,7 @@
 from data.Sample import TumorSample
 from data.Sample import RNASample
 from data.SomaticEvents import SomMutation, CopyNumberEvent
-from data.Enums import CSIZE, CENT_LOOKUP
+from data.Enums import Genome
 from collections import defaultdict, Counter
 import os
 import sys
@@ -54,7 +54,8 @@ class Patient:
                  artifact_whitelist='',
                  use_indels=False,
                  min_coverage=8,
-                 PoN_file=False):
+                 PoN_file=False,
+                 genome_build=None):
 
         # DECLARATIONS
         self.indiv_name = indiv_name
@@ -84,6 +85,8 @@ class Patient:
         # later filled data objects
         self.ND_mutations = []
 
+        self.genome = Genome(build=genome_build) if genome_build is not None else Genome()
+
         # storing of results
         # Clustering
         self.ClusteringResults = None
@@ -95,7 +98,7 @@ class Patient:
 
         self.unclustered_muts = []
 
-        self.concordant_cn_tree = {chrom: IntervalTree() for chrom in list(map(str, range(1, 23))) + ['X', 'Y']}
+        self.concordant_cn_tree = {chrom: IntervalTree() for chrom in self.genome.CHROMS}
 
         # BuildTree
         self.TopTree = None
@@ -150,7 +153,7 @@ class Patient:
                                  ccf_grid_size=grid_size, PoN=self.PoN_file, indiv=self.indiv_name,
                                  use_indels=self.use_indels, min_coverage=self.min_coverage,
                                  _additional_muts=_additional_muts, seg_file=seg_file,
-                                 purity=purity, timepoint_value=timepoint_value, tmb=tmb)
+                                 purity=purity, timepoint_value=timepoint_value, tmb=tmb, genome=self.genome)
 
         self.sample_list.append(new_sample)
         logging.info('Added sample ' + new_sample.sample_name)
@@ -471,8 +474,8 @@ class Patient:
 
         c_trees = {}
         n_samples = len(self.sample_list)
-        for ckey, (chrom, csize) in enumerate(zip(list(map(str, range(1, 23))) + ['X', 'Y'], CSIZE)):
-            centromere = CENT_LOOKUP[ckey + 1]
+        for chrom, csize in self.genome.CHROM_DICT.items():
+            centromere = self.genome.CENT_DICT[chrom]
             tree = IntervalTree()
             for sample in self.sample_list:
                 if sample.CnProfile:
@@ -486,7 +489,7 @@ class Patient:
                 start = seg.begin
                 end = seg.end
                 arm = "p" if end <= centromere else "q"
-                bands = get_bands(chrom, start, end)
+                bands = self.get_bands(chrom, start, end)
                 cns_a1 = []
                 cns_a2 = []
                 ccf_hat_a1 = []
@@ -690,8 +693,8 @@ class Patient:
         # --- main ---
         focals_by_chr = _normalize_focals(focal_regions)
 
-        for ckey, (chrom, csize) in enumerate(zip(list(map(str, range(1, 23))) + ['X', 'Y'], CSIZE)):
-            centromere = CENT_LOOKUP[ckey + 1]
+        for chrom, csize in self.genome.CHROM_DICT.items():
+            centromere = self.genome.CENT_DICT[chrom]
             regs = focals_by_chr.get(chrom, [])
             if not regs:
                 continue
@@ -715,7 +718,7 @@ class Patient:
                         # this window is too large; treat as arm-level elsewhere
                         continue
 
-                    bands = get_bands(chrom, s0, e0)
+                    bands = self.get_bands(chrom, s0, e0)
 
                     # summarize per-allele across samples
                     results = {}
@@ -753,8 +756,8 @@ class Patient:
 
     def get_arm_level_cn_events(self):
         n_samples = len(self.sample_list)
-        for ckey, (chrom, csize) in enumerate(zip(list(map(str, range(1, 23))) + ['X', 'Y'], CSIZE)):
-            centromere = CENT_LOOKUP[ckey + 1]
+        for chrom, csize in self.genome.CHROM_DICT.items():
+            centromere = self.genome.CENT_DICT[chrom]
             tree = IntervalTree()
             for sample in self.sample_list:
                 if sample.CnProfile:
@@ -766,7 +769,7 @@ class Patient:
             for seg in c_tree:
                 start = seg.begin
                 end = seg.end
-                bands = get_bands(chrom, start, end)
+                bands = self.get_bands(chrom, start, end)
                 cns_a1 = []
                 cns_a2 = []
                 ccf_hat_a1 = []
@@ -891,6 +894,17 @@ class Patient:
             sample.low_coverage_mutations.update({cn.var_str: cn})
             sample.add_muts_to_hashtable(cn)
 
+    def get_bands(self, chrom, start, end):
+        """
+        Gets cytobands hit by a CN event
+        """
+        table = self.genome.cytoband_table
+        return table.loc[
+            table["chromosome"].isin([chrom, "chr" + chrom])
+            & (start <= table["end"])
+            & (table["start"] <= end)
+            ].apply(lambda row: Cytoband(row["chromosome"], row["band"]), axis=1).to_list()
+
 
 #################################################################################
 # NDHistogram() - helper class to store combined histograms of mutations to pass to DP
@@ -949,28 +963,11 @@ class NDHistogram:
         return {}
 
 
-def get_bands(chrom, start, end, cytoband=os.path.dirname(__file__) + '/supplement_data/cytoBand.txt'):
-    """
-    Gets cytobands hit by a CN event
-    """
-    bands = []
-    on_c = False
-    with open(cytoband, 'r') as f:
-        for line in f:
-            row = line.strip('\n').split('\t')
-            if row[0].strip('chr') != str(chrom):
-                if on_c:
-                    return bands
-                continue
-            if int(row[1]) <= end and int(row[2]) >= start:
-                bands.append(Cytoband(chrom, row[3]))
-                on_c = True
-            if int(row[1]) > end:
-                return bands
-
+# TODO: refactor Cytoband class to allow for other mapping of cytobands (other species)
+# The cytoband names are the same between hg19 and hg38, so it doesn't matter here.
 
 _cytoband_dict = {}
-with open(os.path.dirname(__file__) + '/supplement_data/cytoBand.txt', 'r') as _f:
+with open(os.path.dirname(__file__) + '/supplement_data/cytoBand.hg19.txt', 'r') as _f:
     for _i, _line in enumerate(_f):
         _row = _line.strip('\n').split('\t')
         _cytoband_dict[(_row[0], _row[3])] = _i

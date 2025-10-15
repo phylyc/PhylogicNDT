@@ -12,7 +12,7 @@ def run_tool(args):
 
     patient_data = Patient(artifact_blacklist=args.artifact_blacklist,
                            indiv_name=args.indiv_id, artifact_whitelist=args.artifact_whitelist,
-                           driver_genes_file=args.driver_genes_file)
+                           driver_genes_file=args.driver_genes_file, genome_build=args.genome_build)
 
     if args.sif:  # if sif file is specified
         sif = pd.read_csv(args.sif, sep="\t")

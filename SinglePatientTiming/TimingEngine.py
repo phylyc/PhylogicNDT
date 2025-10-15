@@ -6,28 +6,18 @@ import scipy.stats
 import scipy.interpolate
 from scipy.special import logsumexp
 import random
-from data.Enums import CSIZE, CENT_LOOKUP
-import os
-import sys
-
-#TODO: get rid of these globals
-_chromosomes = tuple(map(str, range(1, 23))) + ('X',)
-_arms = 'pq'
-_cn_state_whitelist = frozenset({(1., 2.), (0., 2.), (2., 2.)})
-CSIZE = dict(zip(_chromosomes, CSIZE))
-CENT_LOOKUP = {str(c): v for c, v in CENT_LOOKUP.items()}
-CENT_LOOKUP['X'] = CENT_LOOKUP['23']
+import data.Enums as Enums
 
 
 class TimingEngine(object):
     """
     Class for holding samples
     """
-    def __init__(self, patient, cn_state_whitelist=_cn_state_whitelist, chromosomes=_chromosomes,
-                 arms=_arms, min_supporting_muts=3):
+    def __init__(self, patient, cn_state_whitelist=Enums.cn_state_whitelist, min_supporting_muts=3):
         self.patient = patient
+        self.genome = patient.genome
         self.cn_state_whitelist = cn_state_whitelist
-        self.arm_regions = list(itertools.product(chromosomes, arms))
+        self.arm_regions = list(itertools.product(self.genome.CHROMS, self.genome.ARMS))
         self.min_supporting_muts = min_supporting_muts
         self.sample_list = []
         for sample in self.patient.sample_list:
@@ -205,13 +195,8 @@ class TimingEngine(object):
             if _band_index_ready:
                 return
             try:
-                # locate the same cytoBand.txt used by Patient
-                patient_mod = sys.modules[type(self.patient).__module__]
-                cytopath = os.path.join(os.path.dirname(patient_mod.__file__), 'supplement_data', 'cytoBand.txt')
-                with open(cytopath) as f:
-                    for ln in f:
-                        chrom, start, end, band, *_ = ln.strip().split('\t')
-                        _band_index[(chrom.lstrip('chr'), band)] = (int(start), int(end))
+                for _, (chrom, start, end, band, *_) in self.genome.cytoband_table.iterrows():
+                    _band_index[(chrom.lstrip('chr'), band)] = (int(start), int(end))
                 # build per-chrom sorted lists for bp→band lookup
                 tmp = defaultdict(list)
                 for (c, b), (s, e) in _band_index.items():
@@ -370,8 +355,8 @@ class TimingEngine(object):
                     pair = rec['cn_pairs'][si]
                     if not pair:
                         continue
-                    arm_start = 0 if arm=='p' else CENT_LOOKUP[chrom]
-                    arm_end   = CENT_LOOKUP[chrom] if arm=='p' else CSIZE[chrom]
+                    arm_start = 0 if arm=='p' else self.genome.CENT_DICT[chrom]
+                    arm_end   = self.genome.CENT_DICT[chrom] if arm=='p' else self.genome.CHROM_DICT[chrom]
                     for iv in ts.mutation_intervaltree.get(chrom, IntervalTree())[arm_start:arm_end]:
                         mut = iv.data
                         if _pair_match(mut.local_cn_a1, mut.local_cn_a2, *pair):
@@ -458,15 +443,15 @@ class TimingSample(object):
     """
     class for holding a sample
     """
-    def __init__(self, sample, engine, cn_state_whitelist=_cn_state_whitelist, chromosomes=_chromosomes, arms=_arms):
+    def __init__(self, sample, engine, cn_state_whitelist=Enums.cn_state_whitelist):
         self.sample = sample
         self.sample_name = self.sample.sample_name
         self.engine = engine
         self.cn_state_whitelist = cn_state_whitelist
         self.purity = self.sample.purity
         self.CnProfile = self.sample.CnProfile
-        self._chromosomes = chromosomes
-        self.arm_regions = list(itertools.product(chromosomes, arms))
+        self._chromosomes = self.engine.genome.CHROMS
+        self.arm_regions = self.engine.arm_regions
         self.mutation_intervaltree = {chrom: IntervalTree() for chrom in self._chromosomes}
         self.mutations = []
         self.mut_lookup_table = {}
@@ -530,7 +515,7 @@ class TimingSample(object):
         self.missing_arms = []
         full_segtree = self.CnProfile
         for chrN, arm in self.arm_regions:
-            centromere = CENT_LOOKUP[chrN]
+            centromere = self.engine.genome.CENT_DICT[chrN]
             if arm == 'p':
                 arm_segtree = full_segtree[chrN][:centromere]
                 start = 0
@@ -538,7 +523,7 @@ class TimingSample(object):
             else:
                 arm_segtree = full_segtree[chrN][centromere:]
                 start = centromere
-                end = CSIZE[chrN]
+                end = self.engine.genome.CHROM_DICT[chrN]
             true_arm_bp = end - start
             arm_bp = 0
             state_bps = {}
@@ -725,7 +710,7 @@ class TimingCNState(object):
 class TimingCNEvent(object):
     def __init__(self, sample_list, state, Type=None, chrN=None, arm=None, pi_dist=None, copy_number=None,
                  allelic_cn=None, supporting_muts=None, is_clonal=None, cluster_id=None,
-                 cn_state_whitelist=_cn_state_whitelist, ccf_hat=None, start=None, end=None, band_range_str=None):
+                 cn_state_whitelist=Enums.cn_state_whitelist, ccf_hat=None, start=None, end=None, band_range_str=None):
         self.sample_list = sample_list
         self.state = state
         self.Type = Type

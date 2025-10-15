@@ -47,6 +47,13 @@ def build_parser():
     base_parser.add_argument("-sif", "--sample_information_file", dest='sif', type=str, help="""Sample information tsv file with sample_ids and CCF and copy-number file_paths; \n 
     format per row (with header) sample_id\tmaf_fn\tseg_fn\tpurity\ttimepoint""")
 
+    base_parser.add_argument("-ref", '--genome_build',
+                             type=str,
+                             action='store',
+                             dest='genome_build',
+                             default="hg19",
+                             help='Reference genome build. Supported builds: hg19, hg38')
+
     # Filtering of Mutations/Events
     # option for specifying blacklist
     base_parser.add_argument("-bl", '--artifact_blacklist',

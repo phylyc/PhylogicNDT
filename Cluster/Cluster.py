@@ -27,7 +27,7 @@ def run_tool(args):
                                    PoN_file=PoN, indiv_name=args.indiv_id, artifact_whitelist=args.artifact_whitelist,
                                    min_coverage=args.min_cov, use_indels=args.use_indels,
                                    impute_missing=args.impute_missing,
-                                   driver_genes_file=args.driver_genes_file)
+                                   driver_genes_file=args.driver_genes_file, genome_build=args.genome_build)
 
     # delete_auto_bl=args.Delete_Blacklist,
     # Load sample data
