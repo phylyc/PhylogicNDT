@@ -523,6 +523,12 @@ def build_parser():
                              dest='final_sample_list',
                              default=None,
                              help='final sample list file')
+    leaguemodel.add_argument('--final_event_list', '-final_event_list',
+                             type=str,
+                             action='store',
+                             dest='final_event_list',
+                             default=None,
+                             help='final event list file')
     leaguemodel.add_argument('--num_games_against_each_opponent', '-num_games_against_each_opponent',
                              type=int,
                              action='store',

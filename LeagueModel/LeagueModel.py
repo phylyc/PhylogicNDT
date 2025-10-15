@@ -20,12 +20,21 @@ def run_league_model(args):
         return 0
 
     query_res_df1 = pd.read_csv(full_comp_fn, sep='\t')
+
     final_samples = None
     if args.final_sample_list is not None:
         final_samples = []
         with open(args.final_sample_list, 'r') as final_sample_list_fn:
             for i, row in enumerate(final_sample_list_fn):
                 final_samples.append(row.strip("\n"))
+
+    final_events = None
+    if args.final_event_list is not None:
+        final_events = []
+        with open(args.final_event_list, 'r') as final_event_list_fn:
+            for i, row in enumerate(final_event_list_fn):
+                final_events.append(row.strip("\n"))
+
     league_model_run = LeagueModelData.League(
         query_res_df1,
         cohort=args.cohort,
@@ -33,6 +42,7 @@ def run_league_model(args):
         remove_samps_w_event=args.remove_samps_w_event,
         num_games_against_each_opponent=args.num_games_against_each_opponent,
         final_samples=final_samples,
+        final_event_list=final_events,
         max_num_snvs=args.max_num_snvs,
         max_num_cnv_arms=args.max_num_cnv_arms,
         max_num_cnv_arm_gains=args.max_num_cnv_arm_gains,

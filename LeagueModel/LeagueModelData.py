@@ -98,7 +98,7 @@ class League():
     def __init__(
         self,query_res_df,cohort=None,final_event_list=None,keep_only_samples_w_event=None,
         remove_samps_w_event=None,keep_samps=None,remove_samps=None,num_games_against_each_opponent=2,final_samples=None,
-        max_num_snvs=20,max_num_cnv_focal=5,max_num_homdel=5,max_num_cnv_arm_losses=15,max_num_cnv_arm_gains=15,max_num_cnv_arms=30,min_event_prevalence=0.05
+        max_num_snvs=20,max_num_cnv_focal=20,max_num_homdel=5,max_num_cnv_arm_losses=15,max_num_cnv_arm_gains=15,max_num_cnv_arms=30,min_event_prevalence=0.05
     ):
 
         self.query_res_df = query_res_df
@@ -347,7 +347,7 @@ class League():
                                                                   (eve2_gene,eve1_gene):pair_probs[(eve2,eve1)],
                                                                   'unknown':pair_probs['unknown']}
 
-    def get_final_event_list(self,max_mut=20,max_focal=5, max_homdel=5, num_gains_default=15,
+    def get_final_event_list(self,max_mut=20,max_focal=20, max_homdel=5, num_gains_default=15,
                              num_losses_default=15,max_arm=30, min_prevalence=0.05):
 
         final_event_list = []
