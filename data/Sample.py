@@ -436,6 +436,8 @@ class TumorSample:
                     try:
                         row = dict(zip(header, line.strip('\n').split('\t')))
                         chrN = row['Chromosome']
+                        if chrN not in chroms:
+                            continue
                         start = int(float(row['Start.bp']))
                         end = int(float(row['End.bp']))
                         ccf_hat_a1 = float(row['cancer.cell.frac.a1'])
@@ -463,6 +465,8 @@ class TumorSample:
                     try:
                         row = dict(zip(header, line.strip('\n').split('\t')))
                         chrN = row['Chromosome']
+                        if chrN not in chroms:
+                            continue
                         start = int(float(row['Start.bp']))
                         end = int(float(row['End.bp']))
                         cn_a1 = float(row['modal.a1'])
@@ -481,6 +485,8 @@ class TumorSample:
                             chrN = 'X'
                         if chrN == '24':
                             chrN = 'Y'
+                        if chrN not in chroms:
+                            continue
                         start = int(row['Start.bp'])
                         end = int(row['End.bp'])
                         mu_minor = float(row['mu.minor'])
