@@ -1,6 +1,7 @@
 import LeagueModel.LeagueModelData as LeagueModelData
 
 def run_league_model(args):
+    print(args)
     import pandas as pd
     import pickle as pkl
     import random
