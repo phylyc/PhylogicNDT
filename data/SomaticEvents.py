@@ -277,16 +277,13 @@ class CopyNumberEvent():
         self.type = 'CNV'
 
         # self._var_str = ':'.join(map(str, (cn_category, chrN, start.band, end.band, 'a1' if a1 else 'a2')))
-        #
-        # self.event_name = cn_category + str(chrN) + start.band + '-' + end.band[1:] if start != end else mut_category \
-        #                                                                                                   + str(
-        #     chrN) + start.band
+        # self.event_name = cn_category + str(chrN) + start.band + '-' + end.band[1:] if start != end else mut_category + str(chrN) + start.band
         if cn_category.startswith('Arm'):
             gl = cn_category.split('_')[1]
             self.event_name = gl + '_' + str(self.chrN) + self.arm
         elif cn_category.startswith('Focal'):
             gl = cn_category.split('_')[1]
-            self.event_name = gl + '_' + str(chrN) + start.band + '-' + end.band[1:] if start != end else gl + str(chrN) + start.band
+            self.event_name = gl + '_' + str(chrN) + start.band + ('-' + end.band[1:] if start != end else "") # + ":" + ('a1' if a1 else 'a2')
         elif cn_category == 'WGD':
             self.event_name = 'WGD'
         else:
