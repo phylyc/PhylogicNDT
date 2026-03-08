@@ -201,7 +201,8 @@ class Patient:
         if not filen:
             return set()  # empty list
         with open(filen, 'r') as drv_file:
-            drv = [x.strip() for x in drv_file.read().strip().split('\n')]
+            lines = [x.strip().split(" ")[0] for x in drv_file.read().strip().split('\n')]
+            drv = [x for x in lines if not x.startswith("#") and len(x)]
         return set(drv)
 
     def preprocess_samples(self):
@@ -752,7 +753,8 @@ class Patient:
                         cn_category = "Focal_" + cn_category
 
                         if cn_category == gistic_cn_category:
-                            self._add_cn_event_to_samples(chrom=chrom, start=min(bands), end=max(bands), arm=arm_lbl, cns=cn_vec, cn_category=cn_category, ccf_hat=hat, ccf_high=hi, ccf_low=lo, a1=(allele_key == 'a1'), dupe=False)
+                            a1 = allele_key == 'a1'
+                            self._add_cn_event_to_samples(chrom=chrom, start=min(bands), end=max(bands), arm=arm_lbl, cns=cn_vec, cn_category=cn_category, ccf_hat=hat, ccf_high=hi, ccf_low=lo, a1=a1, dupe=not a1)
 
     def get_arm_level_cn_events(self):
         n_samples = len(self.sample_list)
