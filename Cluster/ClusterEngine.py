@@ -92,13 +92,16 @@ class ClusterEngine:
         muts_added = 0
         combined_blacklist = set.union(*[set(x.artifacts_in_blacklist) for x in data.sample_list])
         for mut in combined_lowcov.union(combined_cnvs):
-            if mut in combined_blacklist: continue  # skip blacklisted mutations!!
+            if mut in combined_blacklist:
+                continue  # skip blacklisted mutations!!
             mut_row = []
-            if 'WGD' in mut.var_str:
-                       for sample in data.sample_list:
-                            print(sample.WGD_status)
-                       for sample in data.sample_list:
-                            mut_row.append(sample.get_mut_by_varstr(mut.var_str))
+            # if 'WGD' in mut.var_str:
+            #     for sample in data.sample_list:
+            #         print(sample.WGD_status)
+
+            for sample in data.sample_list:
+                mut_row.append(sample.get_mut_by_varstr(mut.var_str))
+
             if len(mut_row) < len(data.sample_names):
                 continue
 
