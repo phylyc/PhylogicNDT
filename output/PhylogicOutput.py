@@ -1478,26 +1478,64 @@ class PhylogicOutput(object):
         eve_list = []
         cnv_pi_dists = {}
         driver_pi_dists = {}
+
+        def _is_plotworthy_pi_event(eve):
+            status = getattr(eve, 'timing_status', None)
+            return eve.pi_dist is not None and status in (None, 'estimated', 'prior_only', 'subclonal')
+
         if timing_engine.WGD is not None:
             pi_mean, pi_high, pi_low = self._get_mean_high_low(timing_engine.WGD.pi_dist)
             pi_score = '{} ({}-{})'.format(pi_mean, pi_low, pi_high)
-            eve_list.append({'Event name': 'WGD', 'Chromosome': '', 'Position': '', 'Pi score': pi_score})
+            eve_list.append({
+                'Event name': 'WGD',
+                'Chromosome': '',
+                'Position': '',
+                'Pi score': pi_score,
+                'Timing status': getattr(timing_engine.WGD, 'timing_status', 'estimated'),
+                'Timing source': getattr(timing_engine.WGD, 'timing_source', ''),
+                'Timing reason': getattr(timing_engine.WGD, 'timing_reason', '')
+            })
             cnv_pi_dists['WGD'] = list(timing_engine.WGD.pi_dist)
+
         for eve in itertools.chain(*timing_engine.all_cn_events.values()):
-            pi_mean, pi_high, pi_low = self._get_mean_high_low(eve.pi_dist)
-            pi_score = '{} ({}-{})'.format(pi_mean, pi_low, pi_high)
-            eve_list.append({'Event name': eve.event_name, 'Chromosome': eve.chrN, 'Position': '',
-                             'Pi score': pi_score})
-            cnv_pi_dists[eve.event_name] = list(eve.pi_dist)
+            if _is_plotworthy_pi_event(eve):
+                pi_mean, pi_high, pi_low = self._get_mean_high_low(eve.pi_dist)
+                pi_score = '{} ({}-{})'.format(pi_mean, pi_low, pi_high)
+                cnv_pi_dists[eve.event_name] = list(eve.pi_dist)
+            else:
+                pi_score = 'NA'
+
+            eve_list.append({
+                'Event name': eve.event_name,
+                'Chromosome': eve.chrN,
+                'Position': '',
+                'Pi score': pi_score,
+                'Timing status': getattr(eve, 'timing_status', 'unknown'),
+                'Timing source': getattr(eve, 'timing_source', ''),
+                'Timing reason': getattr(eve, 'timing_reason', '')
+            })
+
         for mut in timing_engine.mutations.values():
-            pi_mean, pi_high, pi_low = self._get_mean_high_low(mut.pi_dist)
-            pi_score = '{} ({}-{})'.format(pi_mean, pi_low, pi_high)
-            eve_list.append({'Event name': mut.event_name, 'Chromosome': mut.chrN, 'Position': mut.pos,
-                             'Pi score': pi_score})
-            if mut.event_name.split('_')[0] in drivers:
-                driver_pi_dists[mut.event_name] = list(mut.pi_dist)
-        with open(os.path.dirname(__file__) + '/timing_report_template.html_', 'r') as fh_in, open(
-                indiv_id + '.phylogic_timing_report.html', 'w') as fh_out:
+            if mut.pi_dist is not None:
+                pi_mean, pi_high, pi_low = self._get_mean_high_low(mut.pi_dist)
+                pi_score = '{} ({}-{})'.format(pi_mean, pi_low, pi_high)
+                if mut.event_name.split('_')[0] in drivers:
+                    driver_pi_dists[mut.event_name] = list(mut.pi_dist)
+            else:
+                pi_score = 'NA'
+
+            eve_list.append({
+                'Event name': mut.event_name,
+                'Chromosome': mut.chrN,
+                'Position': mut.pos,
+                'Pi score': pi_score,
+                'Timing status': getattr(mut, 'timing_status', 'estimated'),
+                'Timing source': getattr(mut, 'timing_source', ''),
+                'Timing reason': getattr(mut, 'timing_reason', '')
+            })
+
+        with open(os.path.dirname(__file__) + '/timing_report_template.html_', 'r') as fh_in, \
+                open(indiv_id + '.phylogic_timing_report.html', 'w') as fh_out:
             html_template = fh_in.read()
             fh_out.write(HTMLTemplate(html_template).substitute(**{
                 'indiv_id': indiv_id,
