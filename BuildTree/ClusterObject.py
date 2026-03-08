@@ -58,8 +58,10 @@ class Cluster:
 
     def set_hist(self, new_hist):
         """ Updates cluster density after BuildTree """
-        self._loghist = self._logprior
-        self._hist = np.apply_along_axis(np.exp, 1, self._loghist)
+        # self._loghist = self._logprior
+        # self._hist = np.apply_along_axis(np.exp, 1, self._loghist)
+        self._hist = new_hist
+        self._loghist = np.log(new_hist)
 
     @property
     def loghist(self):
