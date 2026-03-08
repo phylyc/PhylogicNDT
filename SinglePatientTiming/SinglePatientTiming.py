@@ -66,56 +66,71 @@ def run_tool(args):
     phylogicoutput.generate_html_from_timing(args.indiv_id, timing_engine, comps, drivers=driver_genes)
 
 
-def compare_events(timing_engine, drivers=()):
+def compare_events(timing_engine, drivers=(), uncertainty_bins=5):
     """
-    Compare event timings using pi distributions (convolutional difference compared to 0)
+    Compare event timings using pairwise probabilities from the joint distribution
+    over discrete pi bins.
+
+    Returns:
+        comps[(event1, event2)] = (p_before, p_after, p_unknown)
+
+    where:
+        p_before  = P(event1 earlier than event2)
+        p_after   = P(event1 later than event2)
+        p_unknown = P(|bin1 - bin2| <= uncertainty_bins)
     """
     all_events = []
     if timing_engine.WGD:
         all_events.append(timing_engine.WGD)
+
     all_events.extend(itertools.chain(*timing_engine.all_cn_events.values()))
-    all_events.extend(mut for mut in timing_engine.mutations.values() if
-                      mut.prot_change and mut.gene in drivers and (mut.prot_change[0] != mut.prot_change[-1]
-                      or not mut.prot_change[-1].isalpha()))
+    all_events.extend(
+        mut for mut in timing_engine.mutations.values()
+        if mut.prot_change
+        and mut.gene in drivers
+        and (mut.prot_change[0] != mut.prot_change[-1] or not mut.prot_change[-1].isalpha())
+    )
+
     comps = {}
+
     for eve1, eve2 in itertools.combinations(all_events, 2):
         if eve1.pi_dist is None or eve2.pi_dist is None:
             continue
-        pi_diff = eve1.pi_dist - eve2.pi_dist
-        p_before = 0.
-        p_after = 0.
-        diff_sign = 0.
-        for d in pi_diff:
-            if d > 0:
-                if diff_sign < 0:
-                    break
-                p_before += d
-                diff_sign = 1
-            if d < 0:
-                if diff_sign > 0:
-                    break
-                p_after -= d
-                diff_sign = -1
-        for d in reversed(pi_diff):
-            if d > 0:
-                if diff_sign < 0:
-                    break
-                p_after += d
-                diff_sign = 1
-            if d < 0:
-                if diff_sign > 0:
-                    break
-                p_before -= d
-                diff_sign = -1
-        p_unknown = 1. - p_before - p_after
-        # convoluted_dist = np.zeros(201)
-        # for z in range(201):
-        #     start1 = max(z - 100, 0)
-        #     start2 = max(100 - z, 0)
-        #     convoluted_dist[z] = np.inner(eve1.pi_dist[start1:z + 1], eve2.pi_dist[start2:201 - z])
-        # convoluted_dist /= sum(convoluted_dist)
-        # prob_event1_before_event2 = sum(convoluted_dist[:95])
-        # prob_unknown = sum(convoluted_dist[95:106])
-        # prob_event2_before_event1 = sum(convoluted_dist[106:])
-        comps[(eve1.event_name, eve2.event_name)] = (p_before, p_after, p_unknown) # p_before refers to probability that event1 comes before event 2
+
+        p1 = np.asarray(eve1.pi_dist, dtype=float)
+        p2 = np.asarray(eve2.pi_dist, dtype=float)
+
+        if p1.ndim != 1 or p2.ndim != 1 or len(p1) != len(p2):
+            continue
+
+        s1 = p1.sum()
+        s2 = p2.sum()
+        if s1 <= 0 or s2 <= 0:
+            continue
+
+        # normalize defensively
+        p1 = p1 / s1
+        p2 = p2 / s2
+
+        # joint[i, j] = P(event1 in bin i AND event2 in bin j)
+        joint = np.outer(p1, p2)
+
+        # earlier = smaller pi bin
+        p_before = np.triu(joint, k=uncertainty_bins + 1).sum()
+        p_after = np.tril(joint, k=-(uncertainty_bins + 1)).sum()
+        p_unknown = np.trace(joint) if uncertainty_bins == 0 else 0.0
+
+        if uncertainty_bins > 0:
+            for d in range(-uncertainty_bins, uncertainty_bins + 1):
+                p_unknown += np.trace(joint, offset=d)
+
+        # numerical cleanup
+        total = p_before + p_after + p_unknown
+        if total > 0:
+            p_before /= total
+            p_after /= total
+            p_unknown /= total
+
+        comps[(eve1.event_name, eve2.event_name)] = (p_before, p_after, p_unknown)
+
     return comps
