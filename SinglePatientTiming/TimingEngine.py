@@ -18,6 +18,7 @@ class TimingEngine(object):
         self.genome = patient.genome
         self.cn_state_whitelist = cn_state_whitelist
         self.arm_regions = list(itertools.product(self.genome.CHROMS, self.genome.ARMS))
+        self.borrow_arm_prior = True
         self.min_supporting_muts = min_supporting_muts
         self.sample_list = []
         for sample in self.patient.sample_list:
@@ -176,16 +177,28 @@ class TimingEngine(object):
                 if is_clonal:
                     self.truncal_cn_events[eve.event_name].append(eve)
 
-    def get_focal_cn_events(self):
+    def get_focal_cn_events(self, cn_tol=0.20):
         """
         Attach focal CNV events (produced by Patient.add_focal_cn_events) as TimingCNEvent instances.
-        Minimal: build a consensus (cn_a1, cn_a2) across samples in the window; clonality from focal ccf_hat.
+
+        Design:
+          - build focal events from LOCAL interval mutations only
+          - build multi-sample (ND) TimingMut objects across carrier samples
+          - do NOT borrow same-arm mutations as direct evidence
+          - optionally attach metadata so an arm-level prior can be used later in time_events()
+
+        Notes:
+          - This is intentionally closer to the arm-level timing model than the previous focal implementation.
+          - For focal events with too few local supporting mutations, we leave pi_dist unset here and let
+            time_events() decide whether to use uniform, "not estimable", or an optional borrowed prior.
         """
         n_samples = len(self.sample_list)
         if n_samples == 0:
             return
 
-        # --- cytoband cache: (chrom, band_name) -> (start_bp, end_bp)
+        # ------------------------------------------------------------------
+        # cytoband helpers
+        # ------------------------------------------------------------------
         _band_index = {}
         _bands_by_chr = {}
         _band_index_ready = False
@@ -195,190 +208,302 @@ class TimingEngine(object):
             if _band_index_ready:
                 return
             try:
-                for _, (chrom, start, end, band, *_) in self.genome.cytoband_table.iterrows():
-                    _band_index[(chrom.lstrip('chr'), band)] = (int(start), int(end))
-                # build per-chrom sorted lists for bp→band lookup
+                for _, row in self.genome.cytoband_table.iterrows():
+                    chrom, start, end, band = row.iloc[:4]
+                    chrom = str(chrom).lstrip('chr')
+                    _band_index[(chrom, str(band))] = (int(start), int(end))
                 tmp = defaultdict(list)
-                for (c, b), (s, e) in _band_index.items():
-                    tmp[c].append((s, e, b))
-                for c in tmp:
-                    _bands_by_chr[c] = sorted(tmp[c], key=lambda t: t[0])
-                _band_index_ready = True
+                for (chrom, band), (start, end) in _band_index.items():
+                    tmp[chrom].append((start, end, band))
+                for chrom in tmp:
+                    _bands_by_chr[chrom] = sorted(tmp[chrom], key=lambda t: t[0])
             except Exception as e:
                 print(f'Could not load cytoBand.txt for band to bp conversion: {e}')
-                _band_index_ready = True  # avoid retry storms
+            _band_index_ready = True
 
         def _band_to_bp(chrom, band_obj):
-            """Return (start_bp, end_bp) for a Cytoband or band-name string; else None."""
             if band_obj is None:
                 return None
-            name = getattr(band_obj, 'band', None) or str(band_obj)
             _ensure_band_index()
+            name = getattr(band_obj, 'band', None) or str(band_obj)
             return _band_index.get((str(chrom).lstrip('chr'), name))
 
         def _band_at_bp(chrom, pos):
-            arr = _bands_by_chr.get(str(chrom).lstrip('chr'))
-            if not arr:
-                return None
-            for s, e, b in arr:
-                if s <= pos < e:
-                    return b
+            _ensure_band_index()
+            arr = _bands_by_chr.get(str(chrom).lstrip('chr'), [])
+            for start, end, band in arr:
+                if start <= pos < end:
+                    return band
             return None
 
-        def _band_range_str(chrom, s_bp, e_bp):
-            # inclusive range label using bands at start and end-1
-            b1 = _band_at_bp(chrom, s_bp)
-            b2 = _band_at_bp(chrom, max(s_bp, e_bp - 1))
+        def _band_range_str(chrom, start_bp, end_bp):
+            b1 = _band_at_bp(chrom, start_bp)
+            b2 = _band_at_bp(chrom, max(start_bp, end_bp - 1))
             if not b1 or not b2:
                 return None
             return b1 if b1 == b2 else f'{b1}-{b2}'
 
         def _coords(chrom, start, end):
             """
-            Normalize event bounds to integer bps.
-            Accepts ints or Cytoband/string; returns (start_bp, end_bp) or None if unknown.
+            Normalize event bounds to integer bp coordinates.
+            Accepts ints or cytoband-like objects/strings.
             """
-            # ints already? just return
             if isinstance(start, (int, np.integer)) and isinstance(end, (int, np.integer)):
                 return int(start), int(end)
-            # try cytoband → bp
             s = _band_to_bp(chrom, start)
             e = _band_to_bp(chrom, end)
             if s is None or e is None:
                 return None
             return s[0], e[1]
 
+        # ------------------------------------------------------------------
+        # CN coercion / matching helpers
+        # ------------------------------------------------------------------
+        def _scalar(x):
+            arr = np.asarray(x).reshape(-1)
+            if arr.size == 0:
+                return np.nan
+            return float(arr[0])
+
+        def _coerce_cn(v):
+            if v is None:
+                return None
+            v = _scalar(v)
+            if np.isnan(v):
+                return None
+            r = round(v)
+            return float(r) if abs(v - r) <= cn_tol else float(v)
+
+        def _coerce_pair(a1, a2):
+            a1c = _coerce_cn(a1)
+            a2c = _coerce_cn(a2)
+            if a1c is None or a2c is None:
+                return None
+            return (a1c, a2c)
+
+        def _best_segment_pair(ts, chrom, start_bp, end_bp, category):
+            """
+            Pick the best overlapping segment for the focal window in one sample,
+            then return its coerced (cn_a1, cn_a2).
+            """
+            try:
+                ov = list(ts.CnProfile[str(chrom)].overlap(start_bp, end_bp))
+            except Exception:
+                ov = []
+            if not ov:
+                return None
+
+            def _ovlen(iv):
+                return max(0, min(iv.end, end_bp) - max(iv.begin, start_bp))
+
+            def _totcn(iv):
+                seg = iv.data[1]
+                return float(seg['cn_a1']) + float(seg['cn_a2'])
+
+            is_gain = ('gain' in category.lower()) or ('amp' in category.lower())
+            if is_gain:
+                best = max(ov, key=lambda iv: (_totcn(iv), _ovlen(iv)))
+            else:
+                best = min(ov, key=lambda iv: (_totcn(iv), -_ovlen(iv)))
+
+            seg = best.data[1]
+            return _coerce_pair(seg['cn_a1'], seg['cn_a2'])
+
+        def _interval_muts_matching_state(ts, chrom, start_bp, end_bp, state):
+            """
+            Return {var_str -> sample-level TimingMut} for LOCAL mutations in the focal interval
+            whose local CN state exactly matches the focal state after coercion.
+            """
+            out = {}
+            tree = ts.mutation_intervaltree.get(str(chrom), IntervalTree())
+            for iv in tree[start_bp:end_bp]:
+                mut = iv.data  # sample-level TimingMut
+                mpair = _coerce_pair(mut.local_cn_a1, mut.local_cn_a2)
+                if mpair == state:
+                    out[mut.var_str] = mut
+            return out
+
+        # ------------------------------------------------------------------
         # group focal events across samples
-        groups = {}  # (chrom,start,end,arm,is_a1,category) -> {ccf: vec, cn_pairs: list, seg_bounds: list}
+        # key = (chrom, start, end, arm, is_a1, category)
+        # ------------------------------------------------------------------
+        groups = {}
         for si, ts in enumerate(self.sample_list):
             for cn in ts.sample.low_coverage_mutations.values():
-                if getattr(cn, 'type', None) == 'CNV' and cn.cn_category.startswith('Focal_'):
-                    bounds = _coords(cn.chrN, cn.start, cn.end)
-                    if bounds is None:
-                        print(f'Skipping focal CNV without resolvable coords: {cn}')
-                        continue
-                    s_bp, e_bp = bounds
-                    key = (str(cn.chrN), s_bp, e_bp, cn.arm, cn.a1, cn.cn_category)
-                    rec = groups.setdefault(key, {'ccf': np.zeros(n_samples), 'cn_pairs': [None]*n_samples, 'seg_bounds': []})
-                    rec['ccf'][si] = cn.ccf_hat
-                    cn_a1 = np.nan
-                    cn_a2 = np.nan
-                    try:
-                        ov = list(ts.CnProfile[str(cn.chrN)].overlap(s_bp, e_bp))
-                    except Exception:
-                        ov = []
-                    if ov:
-                        def _ovlen(iv):
-                            return max(0, min(iv.end, e_bp) - max(iv.begin, s_bp))
+                if getattr(cn, 'type', None) != 'CNV':
+                    continue
+                if not getattr(cn, 'cn_category', '').startswith('Focal_'):
+                    continue
 
-                        def _totcn(iv):
-                            seg = iv.data[1]
-                            return seg['cn_a1'] + seg['cn_a2']
+                bounds = _coords(cn.chrN, cn.start, cn.end)
+                if bounds is None:
+                    print(f'Skipping focal CNV without resolvable coords: {cn}')
+                    continue
 
-                        is_amp = ('gain' in cn.cn_category.lower()) or ('amp' in cn.cn_category.lower())
-                        # prefer extreme total CN; break ties by larger overlap
-                        if is_amp:
-                            best = max(ov, key=lambda iv: (_totcn(iv), _ovlen(iv)))
-                        else:
-                            best = min(ov, key=lambda iv: (_totcn(iv), -_ovlen(iv)))
-                        seg = best.data[1]
-                        cn_a1 = float(seg['cn_a1'])
-                        cn_a2 = float(seg['cn_a2'])
-                        rec['seg_bounds'].append((best.begin, best.end))
-                    rec['cn_pairs'][si] = (cn_a1, cn_a2)
+                start_bp, end_bp = bounds
+                key = (str(cn.chrN), start_bp, end_bp, cn.arm, bool(cn.a1), cn.cn_category)
+                rec = groups.setdefault(
+                    key,
+                    {
+                        'ccf': np.zeros(n_samples, dtype=float),
+                        'pairs': [None] * n_samples,
+                    }
+                )
+                rec['ccf'][si] = float(getattr(cn, 'ccf_hat', 0.0))
+                rec['pairs'][si] = _best_segment_pair(ts, cn.chrN, start_bp, end_bp, cn.cn_category)
 
         if not groups:
             return
 
         cluster_ccfs = self._get_cluster_ccfs()
-        sample_idx = range(n_samples)
+        sample_idx = np.arange(n_samples)
 
-        def consensus_pair(pairs):
-            vals = []
-            for a1, a2 in pairs:
-                if a1 is None or a2 is None or np.isnan(a1) or np.isnan(a2):
-                    continue
-                a1r = round(a1) if abs(a1 - round(a1)) <= 0.2 else a1
-                a2r = round(a2) if abs(a2 - round(a2)) <= 0.2 else a2
-                vals.append((a1r, a2r))
-            return Counter(vals).most_common(1)[0][0] if vals else None
+        # ------------------------------------------------------------------
+        # build one TimingCNEvent per grouped focal event
+        # ------------------------------------------------------------------
+        for (chrom, start_bp, end_bp, arm, is_a1, category), rec in groups.items():
 
-        # compare up to ordering and small rounding error
-        def _pair_match(m_a1, m_a2, r_a1, r_a2, tol=0.25):
-            x = sorted([float(m_a1), float(m_a2)])
-            y = sorted([float(r_a1), float(r_a2)])
-            return abs(x[0] - y[0]) <= tol and abs(x[1] - y[1]) <= tol
-
-        for (chrom, start, end, arm, is_a1, category), rec in groups.items():
-            cn_state = consensus_pair(rec['cn_pairs'])
-            if cn_state is None:
+            # carrier samples = samples where the focal event exists and a CN state is resolvable
+            carrier_idx = [
+                i for i in range(n_samples)
+                if rec['pairs'][i] is not None and rec['ccf'][i] > 0.0
+            ]
+            if not carrier_idx:
                 continue
-            # gather supporting mutations in the UNION of best-overlap segments (more SNVs, same CN state)
-            if rec['seg_bounds']:
-                sup_start = min(b for b, _ in rec['seg_bounds'])
-                sup_end = max(e for _, e in rec['seg_bounds'])
-            else:
-                sup_start, sup_end = start, end
-            # IMPORTANT: match SNVs to the *per-sample* CN pair, not the cross-sample consensus
+
+            # consensus state among carriers
+            pair_counts = Counter(rec['pairs'][i] for i in carrier_idx)
+            consensus_state, _ = pair_counts.most_common(1)[0]
+
+            # keep only carriers whose focal state matches the consensus exactly
+            matched_carrier_idx = [i for i in carrier_idx if rec['pairs'][i] == consensus_state]
+            if not matched_carrier_idx:
+                continue
+
+            # local, event-specific supporting muts:
+            # intersection across carrier samples, analogous to arm-level concordant states
+            per_sample_local = {}
+            for si in matched_carrier_idx:
+                ts = self.sample_list[si]
+                per_sample_local[si] = _interval_muts_matching_state(
+                    ts, chrom, start_bp, end_bp, consensus_state
+                )
+
+            shared_varstr = None
+            for local_dict in per_sample_local.values():
+                keys = set(local_dict.keys())
+                shared_varstr = keys if shared_varstr is None else (shared_varstr & keys)
+
+            if shared_varstr is None:
+                shared_varstr = set()
+
+            # build ND TimingMuts across carrier samples only
+            event_sample_list = [self.sample_list[i] for i in matched_carrier_idx]
             supporting_muts = []
-            for si, ts in enumerate(self.sample_list):
-                samp_pair = rec['cn_pairs'][si]
-                if not samp_pair or any(map(lambda x: x is None or np.isnan(x), samp_pair)):
-                    continue
-                a1_req, a2_req = samp_pair
-                tree = ts.mutation_intervaltree.get(chrom, IntervalTree())
-                for iv in tree[sup_start:sup_end]:
-                    mut = iv.data  # TimingMut (this sample)
-                    # mut.local_cn_a1 / a2 are per-sample scalars here
-                    # if float(mut.local_cn_a1) == a1_req and float(mut.local_cn_a2) == a2_req:
-                    if _pair_match(mut.local_cn_a1, mut.local_cn_a2, a1_req, a2_req):
-                        supporting_muts.append(mut)
-            purity = [s.purity for s in self.sample_list]
-            state = TimingCNState(self.sample_list, chrom, arm, cn_state, purity, supporting_muts=supporting_muts)
+
+            for var_str in sorted(shared_varstr):
+                ref_mut = per_sample_local[matched_carrier_idx[0]][var_str]
+                m = len(matched_carrier_idx)
+
+                alt_cnt = np.zeros(m)
+                ref_cnt = np.zeros(m)
+                ccf_dist = np.zeros((m, 101))
+                local_cn_a1 = np.zeros(m)
+                local_cn_a2 = np.zeros(m)
+
+                for j, si in enumerate(matched_carrier_idx):
+                    mut = per_sample_local[si][var_str]
+                    alt_cnt[j] = mut.alt_cnt
+                    ref_cnt[j] = mut.ref_cnt
+                    ccf_dist[j, :] = mut.ccf_dist
+                    local_cn_a1[j] = _scalar(mut.local_cn_a1)
+                    local_cn_a2[j] = _scalar(mut.local_cn_a2)
+
+                nd_mut = TimingMut(
+                    event_sample_list,
+                    ref_mut.gene,
+                    ref_mut.chrN,
+                    ref_mut.pos,
+                    ref_mut.alt,
+                    ref_mut.ref,
+                    alt_cnt,
+                    ref_cnt,
+                    local_cn_a1,
+                    local_cn_a2,
+                    ccf_dist,
+                    prot_change=ref_mut.prot_change,
+                    cluster_assignment=ref_mut.cluster_assignment
+                )
+                supporting_muts.append(nd_mut)
+
+                # avoid replacing an existing arm-level ND mutation if already present
+                self.timeable_muts.setdefault(var_str, nd_mut)
+
+            purity = [s.purity for s in event_sample_list]
+            state = TimingCNState(
+                event_sample_list,
+                chrom,
+                arm,
+                consensus_state,
+                purity,
+                supporting_muts=supporting_muts
+            )
             state.call_events(cn_type_prefix='Focal', wgd=(self.WGD is not None))
-            # select allele-matched focal event
+
+            # pick the focal event matching category and requested allele channel
             eve = None
             for e in state.cn_events:
-                if e.Type == category and ((is_a1 and e.allelic_cn == cn_state[0]) or (not is_a1 and e.allelic_cn == cn_state[1])):
+                if e.Type != category:
+                    continue
+                if is_a1 and e.allelic_cn == consensus_state[0]:
                     eve = e
                     break
+                if (not is_a1) and e.allelic_cn == consensus_state[1]:
+                    eve = e
+                    break
+
             if eve is None:
                 continue
-            eve.start = int(start)
-            eve.end = int(end)
-            is_amp = ('gain' in category.lower()) or ('amp' in category.lower())
-            # borrow SNV CCF evidence from other AMP events with same CN state on same arm
-            if len(supporting_muts) < self.min_supporting_muts and is_amp:
-                borrowed = []
-                # collect from arm region with the same (per-sample) CN pair
-                for si, ts in enumerate(self.sample_list):
-                    pair = rec['cn_pairs'][si]
-                    if not pair:
-                        continue
-                    arm_start = 0 if arm=='p' else self.genome.CENT_DICT[chrom]
-                    arm_end   = self.genome.CENT_DICT[chrom] if arm=='p' else self.genome.CHROM_DICT[chrom]
-                    for iv in ts.mutation_intervaltree.get(chrom, IntervalTree())[arm_start:arm_end]:
-                        mut = iv.data
-                        if _pair_match(mut.local_cn_a1, mut.local_cn_a2, *pair):
-                            borrowed.append(mut)
-                            if len(borrowed) >= self.min_supporting_muts:
-                                break
-                supporting_muts.extend(borrowed)
 
-            # focal-specific fallback: if low evidence, avoid collapsing to "after everything"
-            if len(supporting_muts) < self.min_supporting_muts:
-                eve.pi_dist = np.ones(101, dtype=float) / 101
-            # set cytoband-based label for naming
-            eve.band_range_str = _band_range_str(chrom, int(start), int(end))
-            # clonality from focal ccf_hat vector
-            ccf_idx = np.rint(np.clip(np.nan_to_num(np.asarray(rec['ccf'], float), nan=0.0, posinf=1.0, neginf=0.0),0.0, 1.0) * 100).astype(int)
-            clonal_conc = np.prod(cluster_ccfs.get(1, np.ones((n_samples, 101)))[sample_idx, ccf_idx])
+            eve.start = int(start_bp)
+            eve.end = int(end_bp)
+            eve.band_range_str = _band_range_str(chrom, int(start_bp), int(end_bp))
+            eve.supporting_muts = supporting_muts
+
+            # helpful metadata
+            eve.n_local_supporting_muts = len(supporting_muts)
+            eve.carrier_sample_idx = tuple(matched_carrier_idx)
+            eve.carrier_sample_names = tuple(self.sample_list[i].sample_name for i in matched_carrier_idx)
+            eve.local_cn_consensus = consensus_state
+
+            # optional hook for a borrowed ARM-LEVEL prior later in time_events()
+            # This is metadata only; no borrowed evidence is mixed into the local likelihood here.
+            if self.borrow_arm_prior:
+                arm_type = 'Arm_gain' if 'gain' in category.lower() else 'Arm_loss'
+                eve.borrowed_prior_key = (arm_type, str(chrom), arm, float(consensus_state[0]), float(consensus_state[1]))
+            else:
+                eve.borrowed_prior_key = None
+
+            # clonal / trunkal classification still uses the full-sample focal CCF pattern
+            ccf_idx = np.rint(
+                np.clip(np.nan_to_num(np.asarray(rec['ccf'], dtype=float), nan=0.0, posinf=1.0, neginf=0.0), 0.0, 1.0) * 100.0
+            ).astype(int)
+
+            clonal_grid = cluster_ccfs.get(1, np.ones((n_samples, 101)))
+            clonal_conc = np.prod(clonal_grid[sample_idx, ccf_idx])
+
             is_clonal = True
-            for c, grid in cluster_ccfs.items():
+            for cluster_id, grid in cluster_ccfs.items():
                 if np.prod(grid[sample_idx, ccf_idx]) > clonal_conc:
                     is_clonal = False
                     break
+
             eve.is_clonal = is_clonal
+
+            # IMPORTANT:
+            # do NOT assign uniform pi_dist here. Leave that decision to time_events().
+            eve.pi_dist = None
+
             self.all_cn_events.setdefault(eve.event_name, []).append(eve)
             if is_clonal:
                 self.truncal_cn_events.setdefault(eve.event_name, []).append(eve)
@@ -397,46 +522,233 @@ class TimingEngine(object):
 
     def time_events(self):
         """
-        time gains, then supporting mutations, then WGD, then supporting mutations, then higher gains and losses
+        Timing order:
+          1) If WGD exists: time WGD, then mutations relative to WGD, then CN events relative to WGD.
+          2) Otherwise:
+             a) time arm-level clonal gains from local supporting mutations
+             b) build optional arm-level prior lookup
+             c) time focal events using local evidence and optional arm prior
+             d) assign remaining CN events to subclonal / not-estimable states
+          3) assign fallback mutation distributions for untimed mutations
         """
-        uniform_dist = np.ones(101) / 101.
-        subclonal_dist = np.zeros(101)
-        subclonal_dist[100] = 1.
+        uniform_dist = np.ones(101, dtype=float) / 101.0
+        subclonal_dist = np.zeros(101, dtype=float)
+        subclonal_dist[100] = 1.0
+
+        # ------------------------------------------------------------------
+        # Small compatibility wrappers in case helper methods were not added
+        # ------------------------------------------------------------------
+        def _set_not_estimable(ev, reason='insufficient_local_support'):
+            if hasattr(ev, 'set_not_estimable'):
+                ev.set_not_estimable(reason)
+            else:
+                ev.pi_dist = None
+                if hasattr(ev, 'timing_status'):
+                    ev.timing_status = 'not_estimable'
+                    ev.timing_source = None
+                    ev.timing_reason = reason
+
+        def _set_prior_only(ev, pi_dist, source='arm_prior', reason='borrowed_prior_only'):
+            pi_dist = np.asarray(pi_dist, dtype=float)
+            pi_dist = pi_dist / pi_dist.sum()
+            if hasattr(ev, 'set_prior_only'):
+                ev.set_prior_only(pi_dist, source=source, reason=reason)
+            else:
+                ev.pi_dist = pi_dist
+                if hasattr(ev, 'timing_status'):
+                    ev.timing_status = 'prior_only'
+                    ev.timing_source = source
+                    ev.timing_reason = reason
+
+        def _set_status(ev, status=None, source=None, reason=None):
+            if hasattr(ev, 'timing_status'):
+                ev.timing_status = status
+                ev.timing_source = source
+                ev.timing_reason = reason
+
+        def _normalize(dist):
+            dist = np.asarray(dist, dtype=float)
+            s = dist.sum()
+            if s <= 0:
+                return None
+            return dist / s
+
+        def _fuse_prior(post, prior):
+            post = _normalize(post)
+            prior = _normalize(prior)
+            if post is None or prior is None:
+                return None
+            fused = post * prior
+            return _normalize(fused)
+
+        def _is_gain(ev):
+            return 'gain' in ev.Type.lower()
+
+        def _is_focal(ev):
+            return ev.Type.startswith('Focal_')
+
+        def _is_arm(ev):
+            return ev.Type.startswith('Arm_')
+
+        def _has_support(ev):
+            return len(ev.supporting_muts) >= self.min_supporting_muts
+
+        def _state_ok(ev):
+            return (ev.cn_a1, ev.cn_a2) in self.cn_state_whitelist
+
+        def _time_gain_from_local(ev, fuse_with_prior=None):
+            """
+            Time a clonal gain from local interval mutations.
+            Returns True if successful.
+            """
+            if not (_is_gain(ev) and _has_support(ev) and _state_ok(ev)):
+                return False
+
+            ev.get_pi_dist_for_gain()
+            if ev.pi_dist is None:
+                return False
+
+            if fuse_with_prior is not None:
+                fused = _fuse_prior(ev.pi_dist, fuse_with_prior)
+                if fused is not None:
+                    ev.pi_dist = fused
+                    _set_status(ev, status='estimated', source='local+arm_prior', reason=None)
+                else:
+                    _set_status(ev, status='estimated', source='local', reason=None)
+            else:
+                _set_status(ev, status='estimated', source='local', reason=None)
+
+            # time clonal supporting muts relative to this event
+            for mut in ev.supporting_muts:
+                if mut.is_clonal:
+                    mut.get_pi_dist(ev)
+
+            return True
+
+        # ------------------------------------------------------------------
+        # WGD path
+        # ------------------------------------------------------------------
         if self.WGD is not None:
             self.WGD.get_pi_dist()
+            if hasattr(self.WGD, 'timing_status'):
+                self.WGD.timing_status = 'estimated'
+                self.WGD.timing_source = 'wgd'
+                self.WGD.timing_reason = None
+
             for mut in self.mutations.values():
                 if mut.is_clonal:
                     mut.get_pi_dist(self.WGD)
-            for cn_event_name in self.all_cn_events:
-                for cn_event in self.all_cn_events[cn_event_name]:
+
+            for evs in self.all_cn_events.values():
+                for cn_event in evs:
                     if not cn_event.is_clonal:
-                        cn_event.pi_dist = subclonal_dist
+                        cn_event.pi_dist = subclonal_dist.copy()
+                        _set_status(cn_event, status='subclonal', source='clonality_rule', reason='event_not_truncal')
                     elif cn_event.Type.endswith('gain'):
                         cn_event.get_pi_dist_for_higher_gain(self.WGD)
+                        if cn_event.pi_dist is not None:
+                            _set_status(cn_event, status='estimated', source='wgd_rule', reason=None)
+                        else:
+                            _set_not_estimable(cn_event, reason='unsupported_gain_state')
                     elif cn_event.Type.endswith('loss'):
                         cn_event.get_pi_dist_for_loss(self.WGD)
-        else:
-            for cn_event_name, evs in self.all_cn_events.items():
-                for cn_event in evs:
-                    is_focal_gain = cn_event.Type.startswith('Focal_gain')
-                    have_support = len(cn_event.supporting_muts) >= self.min_supporting_muts
-                    state_ok = ((cn_event.cn_a1, cn_event.cn_a2) in self.cn_state_whitelist)
-                    if not cn_event.is_clonal:
-                        # focal amp events with weak clonality get uninformative, not "always-after"
-                        cn_event.pi_dist = uniform_dist if is_focal_gain else subclonal_dist
-                    elif "gain" in cn_event.Type and have_support and state_ok:
-                        cn_event.get_pi_dist_for_gain()
-                        for mut in cn_event.supporting_muts:
-                            if mut.is_clonal:
-                                mut.get_pi_dist(cn_event)
+                        if cn_event.pi_dist is not None:
+                            _set_status(cn_event, status='estimated', source='wgd_rule', reason=None)
+                        else:
+                            _set_not_estimable(cn_event, reason='unsupported_loss_state')
                     else:
-                        cn_event.pi_dist = uniform_dist
+                        _set_not_estimable(cn_event, reason='unsupported_event_type')
+
+        # ------------------------------------------------------------------
+        # No-WGD path
+        # ------------------------------------------------------------------
+        else:
+            arm_events = []
+            focal_events = []
+            other_events = []
+
+            for evs in self.all_cn_events.values():
+                for ev in evs:
+                    if _is_arm(ev):
+                        arm_events.append(ev)
+                    elif _is_focal(ev):
+                        focal_events.append(ev)
+                    else:
+                        other_events.append(ev)
+
+            # --------------------------------------------------------------
+            # Pass 1: time arm-level events first
+            # --------------------------------------------------------------
+            arm_prior_lookup = {}
+
+            for ev in arm_events:
+                if not ev.is_clonal:
+                    ev.pi_dist = subclonal_dist.copy()
+                    _set_status(ev, status='subclonal', source='clonality_rule', reason='event_not_truncal')
+                    continue
+
+                if _time_gain_from_local(ev):
+                    arm_prior_lookup[(ev.Type, ev.chrN, ev.arm, ev.cn_a1, ev.cn_a2)] = ev.pi_dist.copy()
+                else:
+                    # In the no-WGD setting, non-gains / unsupported gains are not event-specifically timeable
+                    _set_not_estimable(
+                        ev,
+                        reason='insufficient_local_support' if not _has_support(ev) else
+                        'unsupported_cn_state' if not _state_ok(ev) else
+                        'unsupported_event_type'
+                    )
+
+            # --------------------------------------------------------------
+            # Pass 2: time focal events using local evidence + optional arm prior
+            # --------------------------------------------------------------
+            for ev in focal_events:
+                if not ev.is_clonal:
+                    ev.pi_dist = subclonal_dist.copy()
+                    _set_status(ev, status='subclonal', source='clonality_rule', reason='event_not_truncal')
+                    continue
+
+                borrowed_prior = None
+                if self.borrow_arm_prior:
+                    prior_key = getattr(ev, 'borrowed_prior_key', None)
+                    if prior_key is not None:
+                        borrowed_prior = arm_prior_lookup.get(prior_key)
+
+                # Preferred path: local likelihood from focal interval mutations
+                if _time_gain_from_local(ev, fuse_with_prior=borrowed_prior):
+                    continue
+
+                # No local evidence, but explicit borrowing enabled
+                if borrowed_prior is not None:
+                    _set_prior_only(ev, borrowed_prior, source='arm_prior', reason='borrowed_prior_only')
+                    continue
+
+                # Otherwise: leave as not estimable
+                _set_not_estimable(
+                    ev,
+                    reason='insufficient_local_support' if not _has_support(ev) else
+                    'unsupported_cn_state' if not _state_ok(ev) else
+                    'unsupported_event_type'
+                )
+
+            # --------------------------------------------------------------
+            # Pass 3: any other CN events (future-proofing)
+            # --------------------------------------------------------------
+            for ev in other_events:
+                if not ev.is_clonal:
+                    ev.pi_dist = subclonal_dist.copy()
+                    _set_status(ev, status='subclonal', source='clonality_rule', reason='event_not_truncal')
+                else:
+                    _set_not_estimable(ev, reason='unsupported_event_type')
+
+        # ------------------------------------------------------------------
+        # Final fallback for SNVs/indels
+        # ------------------------------------------------------------------
         for mut in self.mutations.values():
             if mut.pi_dist is None:
                 if mut.is_clonal:
-                    mut.pi_dist = uniform_dist
+                    mut.pi_dist = uniform_dist.copy()
                 else:
-                    mut.pi_dist = subclonal_dist
+                    mut.pi_dist = subclonal_dist.copy()
 
 
 class TimingSample(object):
@@ -710,7 +1022,8 @@ class TimingCNState(object):
 class TimingCNEvent(object):
     def __init__(self, sample_list, state, Type=None, chrN=None, arm=None, pi_dist=None, copy_number=None,
                  allelic_cn=None, supporting_muts=None, is_clonal=None, cluster_id=None,
-                 cn_state_whitelist=Enums.cn_state_whitelist, ccf_hat=None, start=None, end=None, band_range_str=None):
+                 cn_state_whitelist=Enums.cn_state_whitelist, ccf_hat=None, start=None, end=None, band_range_str=None,
+                 timing_status='unknown', timing_source=None, timing_reason=None):
         self.sample_list = sample_list
         self.state = state
         self.Type = Type
@@ -732,12 +1045,41 @@ class TimingCNEvent(object):
         self.end = end
         self.band_range_str = band_range_str
 
+        self.timing_status = timing_status
+        self.timing_source = timing_source
+        self.timing_reason = timing_reason
+
 
     def __repr__(self):
         if self.Type.startswith('Focal_') and self.start is not None and self.end is not None:
             # return '<TimingCNEvent object: {}_{}{}:{}-{}>'.format(self.Type, self.chrN, self.arm, self.start, self.end)
             return '<TimingCNEvent object: {}_{}{}.{}>'.format(self.Type, self.chrN, self.arm, self.band_range_str)
         return '<TimingCNEvent object: {}_{}{}>'.format(self.Type, self.chrN, self.arm)
+
+    @property
+    def has_pi_posterior(self):
+        return self.pi_dist is not None and np.sum(self.pi_dist) > 0
+
+    def get_effective_pi_dist(self, fallback=None):
+        if self.pi_dist is not None:
+            return self.pi_dist
+        return fallback
+
+    @property
+    def is_time_estimable(self):
+        return self.timing_status == 'estimated'
+
+    def set_not_estimable(self, reason='insufficient_local_support'):
+        self.pi_dist = None
+        self.timing_status = 'not_estimable'
+        self.timing_source = None
+        self.timing_reason = reason
+
+    def set_prior_only(self, pi_dist, source='arm_prior', reason='borrowed_prior_only'):
+        self.pi_dist = pi_dist / np.sum(pi_dist)
+        self.timing_status = 'prior_only'
+        self.timing_source = source
+        self.timing_reason = reason
 
     @property
     def event_name(self):
@@ -757,10 +1099,10 @@ class TimingCNEvent(object):
     @property
     def log_p2_prior(self):
         if self.cn_a2 == 2.:
-            if self.cn_a1 == 0. or self.cn_a2 == 2.:
-                return np.log(3 * (np.linspace(0, 1, 101) + 1) ** -2)
+            if self.cn_a1 == 0. or self.cn_a1 == 2.:
+                return np.log(2 * (np.linspace(0, 1, 101) + 1) ** -2)
             if self.cn_a1 == 1.:
-                return np.log(2 * (np.linspace(0, .5, 101) + 1) ** -2)
+                return np.log(3 * (np.linspace(0, .5, 101) + 1) ** -2)
         raise NotImplementedError('Higher gains not implemented')
 
     def get_p2_dist_for_gain(self):
