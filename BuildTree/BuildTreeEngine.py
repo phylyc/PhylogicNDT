@@ -44,10 +44,9 @@ class BuildTreeEngine:
     @staticmethod
     def get_average_clusters_densities(clusters_densities, conv=1e-40):
         """ Averages and normalizes clusters densities across MCMC iterations with similar Trees"""
-        from sklearn.preprocessing import normalize
         average_clusters_densities = {}
         for cluster_id, cluster_ccf_list in clusters_densities.items():
-            average_density = sum(cluster_ccf_list) / float(len(cluster_ccf_list)) + conv
+            average_density = np.sum(cluster_ccf_list, axis=0) / float(len(cluster_ccf_list)) + conv
             normalized_average_distribution = average_density
             average_clusters_densities[cluster_id] = normalized_average_distribution
         return average_clusters_densities
