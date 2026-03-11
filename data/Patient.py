@@ -580,7 +580,7 @@ class Patient:
             if isinstance(focals, str):
                 with open(focals) as fin:
                     for ln in fin:
-                        if not ln.strip() or ln.startswith('#') or ln.startswith("track name"):
+                        if not ln.strip() or ln.startswith('#') or ln.startswith("track name") or ln.startswith("chromosome"):
                             continue
                         t = ln.strip().split()
                         chrom = t[0].lstrip('chr')
