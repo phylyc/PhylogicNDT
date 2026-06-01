@@ -1474,7 +1474,14 @@ class PhylogicOutput(object):
         return node_positions
 
     def generate_html_from_timing(self, indiv_id, timing_engine, comps, drivers=()):
-        nodes, edges, pos = self.draw_timing_graph(indiv_id, comps)
+        # For the comp graph, exclude fully-unknown pairs (p_before == 0 and
+        # p_after == 0) which come from untimeable events and carry no
+        # ordering information.
+        timeable_comps = {
+            pair: probs for pair, probs in comps.items()
+            if probs[0] > 0 or probs[1] > 0
+        }
+        nodes, edges, pos = self.draw_timing_graph(indiv_id, timeable_comps)
         eve_list = []
         cnv_pi_dists = {}
         driver_pi_dists = {}
