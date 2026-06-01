@@ -451,16 +451,22 @@ class TimingEngine(object):
             state.call_events(cn_type_prefix='Focal', wgd=(self.WGD is not None))
 
             # pick the focal event matching category and requested allele channel
+            # Use approximate matching because _coerce_cn may keep fractional
+            # values (e.g. 4.7) while call_events rounds to the nearest int
+            # (e.g. 5.0), causing exact == to fail for high-level CN states.
+            def _cn_close(a, b, tol=0.5):
+                return abs(float(a) - float(b)) < tol
+
+            target_cn = consensus_state[0] if is_a1 else consensus_state[1]
             eve = None
+            best_dist = float('inf')
             for e in state.cn_events:
                 if e.Type != category:
                     continue
-                if is_a1 and e.allelic_cn == consensus_state[0]:
+                d = abs(float(e.allelic_cn) - float(target_cn))
+                if d < best_dist and _cn_close(e.allelic_cn, target_cn):
                     eve = e
-                    break
-                if (not is_a1) and e.allelic_cn == consensus_state[1]:
-                    eve = e
-                    break
+                    best_dist = d
 
             if eve is None:
                 continue
@@ -722,9 +728,16 @@ class TimingEngine(object):
                     _set_prior_only(ev, borrowed_prior, source='arm_prior', reason='borrowed_prior_only')
                     continue
 
-                # Otherwise: leave as not estimable
-                _set_not_estimable(
+                # Focal events that cannot be locally timed still get a
+                # uniform pi_dist so they remain visible as "present but
+                # uninformative" in comparisons and downstream output,
+                # matching the pre-97c6b4f behavior where all untimeable
+                # events received uniform distributions.
+                ev.pi_dist = uniform_dist.copy()
+                _set_status(
                     ev,
+                    status='not_estimable',
+                    source='uniform_fallback',
                     reason='insufficient_local_support' if not _has_support(ev) else
                     'unsupported_cn_state' if not _state_ok(ev) else
                     'unsupported_event_type'
