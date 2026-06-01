@@ -754,7 +754,11 @@ class Patient:
 
                         if cn_category == gistic_cn_category:
                             a1 = allele_key == 'a1'
-                            self._add_cn_event_to_samples(chrom=chrom, start=min(bands), end=max(bands), arm=arm_lbl, cns=cn_vec, cn_category=cn_category, ccf_hat=hat, ccf_high=hi, ccf_low=lo, a1=a1, dupe=not a1)
+                            a2 = not a1
+                            is_gain = "gain" in cn_category
+                            is_loss = not is_gain
+                            dupe = is_gain and a2 or is_loss and a1
+                            self._add_cn_event_to_samples(chrom=chrom, start=min(bands), end=max(bands), arm=arm_lbl, cns=cn_vec, cn_category=cn_category, ccf_hat=hat, ccf_high=hi, ccf_low=lo, a1=a1, dupe=dupe)
 
     def get_arm_level_cn_events(self):
         n_samples = len(self.sample_list)
