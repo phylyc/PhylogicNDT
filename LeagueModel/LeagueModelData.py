@@ -20,6 +20,39 @@ _INT_TOKEN_RE = re.compile(r'(\d+)')
 _CODING_SILENT_CLASS = 'SILENT'
 _CODING_NONSYN_CLASS = 'NONSYN'
 
+# Canonical column names expected by load_df() and the aliases accepted
+# from patient-level comparison tables.
+_COLUMN_ALIASES = {
+    'samp': 'sample',
+    'sample_id': 'sample',
+    'sample': 'sample',
+    'eve1': 'event1',
+    'event1': 'event1',
+    'eve2': 'event2',
+    'event2': 'event2',
+    'p1->2': 'p_event1_win',
+    'prob_event1_before_event2': 'p_event1_win',
+    'p_event1_win': 'p_event1_win',
+    'p2->1': 'p_event2_win',
+    'prob_event2_before_event1': 'p_event2_win',
+    'p_event2_win': 'p_event2_win',
+    'unknown': 'unknown',
+    'prob_unknown': 'unknown',
+}
+
+
+def _normalize_comp_columns(df):
+    """Rename comparison-table columns to the canonical names expected by
+    ``League.load_df``.  Unrecognised columns are left unchanged."""
+    rename = {}
+    for col in df.columns:
+        mapped = _COLUMN_ALIASES.get(col.strip().lower())
+        if mapped is not None and mapped not in rename.values():
+            rename[col] = mapped
+    if rename:
+        df = df.rename(columns=rename)
+    return df
+
 
 def _normalize_gene_token(value):
     return str(value).strip().upper()
@@ -204,7 +237,7 @@ class League():
             mutation_event_resolution='gene', hotspot_fn=None, drop_silent_mutations=None
     ):
 
-        self.query_res_df = query_res_df
+        self.query_res_df = _normalize_comp_columns(query_res_df)
         self.seasons = []
         self.odds = {}
         self.event_pos = []

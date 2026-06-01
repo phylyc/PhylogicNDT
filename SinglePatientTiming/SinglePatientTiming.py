@@ -66,24 +66,62 @@ def run_tool(args):
     phylogicoutput.generate_html_from_timing(args.indiv_id, timing_engine, comps, drivers=driver_genes)
 
 
-def compare_events(timing_engine, drivers=(), uncertainty_bins=5):
+def _dedup_cn_events(cn_events_dict):
+    """Deduplicate CN events that share the same event_name.
+
+    When a CN state produces two events with the same name (e.g. two
+    Arm_gain events on the same arm from a 2/2 state), keep only the
+    event with the most supporting mutations so comparisons are not
+    silently overwritten downstream.
     """
-    Compare event timings using pairwise probabilities from the joint distribution
-    over discrete pi bins.
+    seen = {}  # event_name -> (best_event, n_supporting_muts)
+    for evs in cn_events_dict.values():
+        for ev in evs:
+            name = ev.event_name
+            n_sup = len(getattr(ev, 'supporting_muts', None) or [])
+            prev = seen.get(name)
+            if prev is None:
+                seen[name] = (ev, n_sup)
+            else:
+                if n_sup > prev[1]:
+                    seen[name] = (ev, n_sup)
+    return [ev for ev, _ in seen.values()]
+
+
+def compare_events(timing_engine, drivers=(), uncertainty_bins=5):
+    """Compare event timings using pairwise probabilities from the joint
+    distribution over discrete pi bins.
+
+    For each pair of events, the joint probability matrix is computed as the
+    outer product of their (independent) pi distributions.  The upper
+    triangle (event1 earlier), lower triangle (event1 later), and a
+    near-diagonal uncertainty band are summed to obtain the three
+    comparison probabilities.
+
+    Events whose timing cannot be estimated (``pi_dist is None``) are
+    still included with fully-unknown comparisons ``(0, 0, 1)`` so that
+    they remain visible in the comparison table and are counted correctly
+    in downstream LeagueModel prevalence.
+
+    When multiple CN events share the same ``event_name`` (e.g. two
+    gains from a 2/2 arm state), only the event with the most supporting
+    mutations is kept to avoid silent overwrites in the output dict.
+
+    Args:
+        timing_engine: A ``TimingEngine`` instance with timed events.
+        drivers: Iterable of driver gene names.
+        uncertainty_bins: Half-width of the near-diagonal band (in pi
+            bins) that is counted as *unknown*.  Default 5 (≈ 5 %).
 
     Returns:
-        comps[(event1, event2)] = (p_before, p_after, p_unknown)
-
-    where:
-        p_before  = P(event1 earlier than event2)
-        p_after   = P(event1 later than event2)
-        p_unknown = P(|bin1 - bin2| <= uncertainty_bins)
+        dict mapping ``(event1_name, event2_name)`` to
+        ``(p_before, p_after, p_unknown)``.
     """
     all_events = []
     if timing_engine.WGD:
         all_events.append(timing_engine.WGD)
 
-    all_events.extend(itertools.chain(*timing_engine.all_cn_events.values()))
+    all_events.extend(_dedup_cn_events(timing_engine.all_cn_events))
     all_events.extend(
         mut for mut in timing_engine.mutations.values()
         if mut.prot_change
@@ -95,6 +133,10 @@ def compare_events(timing_engine, drivers=(), uncertainty_bins=5):
 
     for eve1, eve2 in itertools.combinations(all_events, 2):
         if eve1.pi_dist is None or eve2.pi_dist is None:
+            # Event exists but timing is not estimable – record as fully
+            # unknown so that the event still appears in the comparison
+            # table (and therefore in LeagueModel prevalence counts).
+            comps[(eve1.event_name, eve2.event_name)] = (0.0, 0.0, 1.0)
             continue
 
         p1 = np.asarray(eve1.pi_dist, dtype=float)
