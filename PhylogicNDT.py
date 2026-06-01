@@ -75,8 +75,7 @@ def build_parser():
                              type=str,
                              action='store',
                              dest='driver_genes_file',
-                             default=os.path.join(os.path.dirname(__file__),
-                                                  'data/supplement_data/Driver_genes_v1.0.txt'),
+                             default=os.path.join(os.path.dirname(__file__), 'data/supplement_data/Driver_genes_v1.0.txt'),
                              help='driver list file')
 
     base_parser.add_argument("-tr", '--treatment_data',
@@ -488,6 +487,18 @@ def build_parser():
                              dest='n_seasons',
                              default=200,
                              help='number of seasons')
+    leaguemodel.add_argument('--n_jobs', '-n_jobs',
+                             type=int,
+                             action='store',
+                             dest='n_jobs',
+                             default=1,
+                             help='number of parallel jobs to run permutations in parallel')
+    leaguemodel.add_argument('--perm_chunk_size',
+                             type=int,
+                             action='store',
+                             dest='perm_chunk_size',
+                             default=10,
+                             help='number of permutations per job')
     leaguemodel.add_argument('--percent_subset', '-percent_subset',
                              type=float,
                              action='store',
@@ -536,6 +547,21 @@ def build_parser():
                              dest='final_event_list',
                              default=None,
                              help='final event list file')
+    leaguemodel.add_argument('--drop_silent_mutations',
+                             action='store_true',
+                             dest='drop_silent_mutations',
+                             default=False)
+    leaguemodel.add_argument('--hotspot_fn',
+                             action='store',
+                             dest='hotspot_fn',
+                             default=None,
+                             help='File listing cancer hotspot mutations to stratify events.')
+    leaguemodel.add_argument('--mutation_event_resolution',
+                             action='store',
+                             choices=["gene", "hotspot_nonsyn"],
+                             dest='mutation_event_resolution',
+                             default="gene",
+                             help='Resolution for collapsing SNV events')
     leaguemodel.add_argument('--num_games_against_each_opponent', '-num_games_against_each_opponent',
                              type=int,
                              action='store',
@@ -586,15 +612,19 @@ def build_parser():
     return parser.parse_args()
 
 
-# if __name__ == "main":
-args = build_parser()
-# get current working directory
-filename = os.path.join(os.getcwd(), f"phylogicndt.{args.tool}.log")
-print(filename)
-logging.basicConfig(filename=filename,
-                    filemode='w',
-                    format='%(asctime)s - %(levelname)s - %(message)s',
-                    datefmt='%d-%b-%y %H:%M:%S',
-                    level=getattr(logging, "INFO"),
-                    force=True)
-args.func(args)
+if __name__ == '__main__':
+    args = build_parser()
+    # get current working directory
+    filename = os.path.join(os.getcwd(), f"phylogicndt.{args.tool}.log")
+    print(filename)
+    logging.basicConfig(filename=filename,
+                        filemode='w',
+                        format='%(asctime)s - %(levelname)s - %(message)s',
+                        datefmt='%d-%b-%y %H:%M:%S',
+                        level=getattr(logging, "INFO"),
+                        force=True)
+    # Silence verbose font-subsetting logs from fontTools (used by matplotlib
+    # when saving PDF/PNG).  Without this every save floods the log with
+    # hundreds of glyph-list and table-pruning INFO messages.
+    logging.getLogger('fontTools').setLevel(logging.WARNING)
+    args.func(args)
