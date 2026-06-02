@@ -1,4 +1,19 @@
+# Version control
 .git
+.gitignore
+
+# IDE / editor settings
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS metadata
+.DS_Store
+Thumbs.db
+
+# Python build artifacts
 __pycache__/
 *.pyc
 *.pyo
@@ -6,3 +21,11 @@ build/
 dist/
 *.egg-info/
 .pytest_cache/
+.mypy_cache/
+.tox/
+
+# Environment / secrets
+.env
+.env.*
+*.pem
+*.key
