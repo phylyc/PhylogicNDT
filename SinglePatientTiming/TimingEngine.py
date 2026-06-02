@@ -730,9 +730,7 @@ class TimingEngine(object):
 
                 # Focal events that cannot be locally timed still get a
                 # uniform pi_dist so they remain visible as "present but
-                # uninformative" in comparisons and downstream output,
-                # matching the pre-97c6b4f behavior where all untimeable
-                # events received uniform distributions.
+                # uninformative" in comparisons and downstream output.
                 ev.pi_dist = uniform_dist.copy()
                 _set_status(
                     ev,

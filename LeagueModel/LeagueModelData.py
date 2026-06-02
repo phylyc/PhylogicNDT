@@ -3,14 +3,11 @@ import matplotlib
 matplotlib.use('Agg')
 matplotlib.rcParams['pdf.fonttype'] = 42
 import csv
-from pathlib import Path
 import re
 import numpy as np
 import seaborn as sns
-from matplotlib import gridspec
 import matplotlib.pyplot as plt
 import operator
-from scipy.stats import gaussian_kde
 import itertools
 import copy
 import logging
@@ -838,135 +835,114 @@ class League():
     ##### plotting #####
     ####################
 
-    ## helper function ##
-    def autolabelh(self, rects, labels=None):
-        # attach some text labels
-        for i, rect in enumerate(rects):
-            height = rect.get_width()
-            label = str(int(height)) if labels is None else str(labels[i])
-            plt.text(height + 1.5, rect.get_xy()[1] + 0.3, str(label), ha='left', va='center', fontsize=4)
+    @staticmethod
+    def _event_color(event_name):
+        if 'loss' in event_name:
+            return '#3498db'
+        if 'homdel' in event_name:
+            return '#2929a3'
+        if event_name == 'WGD':
+            return 'black'
+        if 'gain' in event_name:
+            return '#e74c3c'
+        return '#7bb274'
 
-    def plot_league_run(self,type='odds'):
+    @staticmethod
+    def _event_label(event_name):
+        """Pretty-print an event name for axis labels."""
+        return ' '.join(event_name.split('_'))
 
+    def plot_league_run(self, type='odds'):
+        import pandas as pd
+
+        # ── collect per-event data ────────────────────────────────────
+        records = []
         if type == 'odds':
-            odds_plot = plt.figure(figsize=(8.0, 10.0))
+            for eve in self.log_odds_full_run:
+                for val in self.log_odds_full_run[eve]:
+                    records.append({'event': eve, 'value': -val})
         elif type == 'pos':
-            pos_plot = plt.figure(figsize=(8.0, 10.0))
+            for eve in self.final_event_list:
+                for val in self.event_positions.get(eve, []):
+                    records.append({'event': eve, 'value': val})
         else:
             return 0
 
-        # fig4 is the odds plot (no clonal bars)
-        sns.set(font_scale=1.0)
-        sns.set_style('white')
-        gs = gridspec.GridSpec(1, 10,wspace=0.05, hspace=0.05)
-        ax0 = plt.subplot(gs[1:8])
-        #plt.gcf().subplots_adjust(left=0.15)
+        if not records:
+            return 0
 
+        df = pd.DataFrame(records)
+        df['label'] = df['event'].map(self._event_label)
+
+        # ── sort order (by median, then extremes) ─────────────────────
+        agg = df.groupby('event')['value'].agg(['median', 'min', 'max'])
         if type == 'odds':
-            sorted_medians = [(y[0],y[1]) for y in sorted([(eve,np.median(self.log_odds_full_run[eve]),
-                                                            min(self.log_odds_full_run[eve]),
-                                                            max(self.log_odds_full_run[eve]))
-                                                           for eve in self.log_odds_full_run.keys()],
-                                                          key = lambda x:(x[1],x[2],x[3]),reverse=True)]
-        elif type == 'pos':
-            sorted_medians = [(y[0],y[1]) for y in sorted([(eve,np.median(self.event_positions[eve]),
-                                                            min(self.event_positions[eve]),
-                                                            max(self.event_positions[eve]))
-                                                           for eve in self.final_event_list
-                                                           if len(self.event_positions.get(eve, [])) > 0],
-                                                          key = lambda x:(x[1],x[2],x[3]))]
+            agg = agg.sort_values(by=['median', 'min', 'max'], ascending=True)
+        else:
+            agg = agg.sort_values(by=['median', 'min', 'max'], ascending=True)
+        ordered_events = list(agg.index)
+        label_order = [self._event_label(e) for e in ordered_events]
+        reversed_ordered_events = reversed(ordered_events)
 
+        n_events = len(ordered_events)
+        fig = plt.figure(figsize=(3.6, 0.09 * n_events + 1.5))
+        gs = fig.add_gridspec(ncols=2, nrows=1, width_ratios=[1, 0.25], wspace=0.05)
 
-        colors_v = []
-        for med in sorted_medians:
-            if 'loss' in med[0]: colors_v.append("#3498db")
-            elif 'homdel' in med[0]: colors_v.append(sns.xkcd_rgb["royal blue"])
-            elif med[0] == 'WGD': colors_v.append("black")
-            elif 'gain' in med[0]: colors_v.append("#e74c3c")
-            else: colors_v.append(sns.xkcd_rgb["faded green"])
-
-        colors_l = ['black'] * len(colors_v)
+        # ── left panel: violin plot ───────────────────────────────────
+        ax0 = fig.add_subplot(gs[0, 0])
+        ax0.axvline(0, color='#d3d3d3', linewidth=0.5, zorder=0.1)
+        sns.violinplot(
+            data=df,
+            x='value',
+            y='label',
+            order=label_order,
+            color='#a0a0a0',
+            linewidth=0.6,
+            inner=None,
+            density_norm='count',
+            cut=0,
+            ax=ax0,
+        )
+        ax0.tick_params(axis='y', pad=3, length=0, labelsize=5)
+        ax0.set_title(
+            '{},  N(cases) = {},  N(events) = {}'.format(
+                self.cohort, self.full_n_samps, n_events),
+            fontsize=8, pad=8,
+        )
         if type == 'odds':
-            safe_num_seasons = max(self.num_seasons, 1)
-            x_in = np.linspace(np.log10(1./safe_num_seasons), np.log10(safe_num_seasons), 10000 + 1)
-        elif type == 'pos':
-            x_in = np.linspace(1, len(self.final_event_list), 10000 + 1)
-
-        for j, med in enumerate(sorted_medians):
-
-            lw = 1
-            if type == 'odds':
-                to_plot = -np.log10(np.array(self.odds[med[0]]['odds_early']))
-            elif type == 'pos':
-                to_plot = self.event_positions[med[0]]
-
-            if len(to_plot) == 0:
-                continue
-            if max(to_plot) == min(to_plot):
-                to_plot = list(to_plot)
-                to_plot.append(min(to_plot) - 0.1)
-                to_plot.append(max(to_plot) + 0.1)
-                to_plot = np.array(to_plot)
-            density = gaussian_kde(to_plot)
-            density.covariance_factor = lambda: 0.4
-            density._compute_covariance()
-            y = density(x_in)
-            y_new = y / np.sum(y)
-
-            left_sum = 0
-            left_idx = 0
-            for i in range(len(x_in)):
-                left_sum += y_new[i]
-                if left_sum >= 0.000005: break
-                else: left_idx = i
-            right_sum = 0
-            right_idx = len(x_in)-1
-            for i in range(len(x_in)-1,-1,-1):
-                right_sum += y_new[i]
-                if right_sum >= 0.000005: break
-                else: right_idx = i
-
-            y_new = y_new / max(y_new) * 0.2
-            plt.fill_between(x_in[left_idx:right_idx],y_new[left_idx:right_idx] + len(sorted_medians) - j - 1,
-                             -y_new[left_idx:right_idx] + len(sorted_medians) - j - 1, color='gray',
-                             alpha=0.8, lw=lw)
-
-        sorted_medians.reverse()
-        colors_v.reverse()
-
-        ax0.set_yticks([i for i in range(0, len(sorted_medians))])
-        ax0.set_yticklabels([str(" ".join(med[0].split("_"))) for med in sorted_medians],
-                            fontsize=15. * 35 / max(30, len(self.final_event_list)))
-        for ytick, color in zip(ax0.get_yticklabels(), colors_l): ytick.set_color(color)
-        plt.title(self.cohort + ', N(samp) = ' + str(self.full_n_samps)+', N(events) = ' +
-                  str(len(self.final_event_list)), fontsize=12)
-        if type == 'odds':
-            plt.xlabel('relative log odds timing', fontsize=12)
-            safe_num_seasons = max(self.num_seasons, 1)
-            plt.xlim([np.log10(1./safe_num_seasons)-0.1, np.log10(safe_num_seasons)+0.1])
-        elif type == 'pos':
-            plt.xlabel('event position', fontsize=12)
-            plt.xlim([0, len(self.final_event_list)+1])
-        plt.ylabel('event', fontsize=12)
-        plt.ylim([-0.5, len(sorted_medians) - 0.5])
-        ax2 = plt.subplot(gs[8:])
-        plt.title('prevalence', fontsize=10)
-        sns.set_style('white')
-        bars = ax2.barh(np.array(range(len(sorted_medians))),
-                        [self.full_event_prev[event[0]] for event in sorted_medians], color=colors_v, align='center')
-        labels = [str(int(round(
-            [self.full_event_prev[event[0]] for event in
-             sorted_medians][i] / float(self.full_n_samps), 2) * 100)) + "%" for i in range(len(sorted_medians))]
-
-        self.autolabelh(bars, labels)
+            ax0.set_xlabel('relative log odds timing', fontsize=7)
+            safe = max(getattr(self, 'num_seasons', 1), 1)
+            ax0.set_xlim(np.log10(1.0 / safe) - 0.1, np.log10(safe) + 0.1)
+        else:
+            ax0.set_xlabel('event position', fontsize=7)
+            ax0.set_xlim(0, n_events + 1)
+        ax0.set_ylabel('')
         sns.despine(ax=ax0, left=True, bottom=True)
-        plt.axis("off")
-        plt.ylim([-0.5, len(sorted_medians) - 0.5])
+
+        # ── right panel: prevalence bars ──────────────────────────────
+        ax1 = fig.add_subplot(gs[0, 1])
+        prev_values = [self.full_event_prev.get(e, 0) for e in reversed_ordered_events]
+        prev_fracs = [v / max(float(self.full_n_samps), 1) for v in prev_values]
+        bar_colors = [self._event_color(e) for e in reversed_ordered_events]
+
+        y_pos = np.arange(n_events)
+        ax1.barh(y_pos, prev_fracs, color=bar_colors, height=0.7, align='center')
+        ax1.set_yticks(y_pos)
+        ax1.set_yticklabels([])
+        ax1.set_ylim(-0.5, n_events - 0.5)
+        for i, frac in enumerate(prev_fracs):
+            ax1.text(frac + 0.02, i, '{:.0f}%'.format(frac * 100),
+                     ha='left', va='center', fontsize=5)
+        ax1.set_xlim(0, 1)
+        ax1.set_xticks([])
+        ax1.set_xlabel('Prevalence', fontsize=6, loc='left')
+        ax1.set_ylabel('')
+        sns.despine(ax=ax1, left=True, bottom=True, top=True, right=True)
 
         if type == 'odds':
-            self.odds_plot = odds_plot
+            self.odds_plot = fig
         elif type == 'pos':
-            self.pos_plot = pos_plot
+            self.pos_plot = fig
 
     ####################
     ###### outputs #####
