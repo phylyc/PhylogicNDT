@@ -1350,35 +1350,68 @@ class TimingMut(object):
 
     def get_pi_dist(self, matched_gain):
         """
-        get pi dist for mutation by comparing to a matched gain
+        Compute the timing distribution for this mutation relative to *matched_gain*.
+
+        Per-sample approach: each sample is evaluated independently based on its
+        own local copy-number state.  Samples whose CN state does not permit
+        multiplicity decomposition are skipped.  The per-sample likelihoods
+        (p_before, p_after the gain) are combined across all timeable samples
+        via the same log-likelihood product used by the original implementation.
+
+        This replaces the previous requirement that local CN must be identical
+        across all samples, which dropped mutations whenever segmental CN
+        estimates differed due to noise or subclonal CN changes.
         """
         if matched_gain.pi_dist is None:
             return
-        cn_a1 = np.unique(self.local_cn_a1)
-        cn_a2 = np.unique(self.local_cn_a2)
-        if len(cn_a1) > 1 or len(cn_a2) > 1:
+
+        n_samples = len(self.sample_list)
+        purity = np.array([s.purity for s in self.sample_list])
+
+        # Per-sample p(before) and p(after) the gain, based on multiplicity.
+        p_before = np.full(n_samples, np.nan)
+        p_after = np.full(n_samples, np.nan)
+
+        for s in range(n_samples):
+            a1_raw = self.local_cn_a1[s]
+            a2_raw = self.local_cn_a2[s]
+            if np.isnan(a1_raw) or np.isnan(a2_raw):
+                continue
+            a1 = round(a1_raw)
+            a2 = round(a2_raw)
+            max_cn = int(a2)
+            if max_cn < 2:
+                continue  # diploid or haploid — no gain to time against
+
+            # Per-sample multiplicity likelihoods (scalar per multiplicity m)
+            n_s = self.alt_cnt[s] + self.ref_cnt[s]
+            k_s = self.alt_cnt[s]
+            p_s = purity[s]
+            total_cn = a1 + a2
+            mult_lik = {}
+            for m in range(1, max_cn + 1):
+                p_m = (m * p_s) / (total_cn * p_s + 2.0 * (1.0 - p_s))
+                mult_lik[m] = scipy.stats.binom.pmf(k_s, n_s, p_m)
+
+            if a1 == 0 and a2 >= 2 or a1 == a2 != 1:
+                lb = sum(mult_lik[i] * i / max_cn for i in range(2, max_cn + 1))
+                la = sum(mult_lik[i] * (max_cn - i) / max_cn for i in range(2, max_cn)) + mult_lik[1]
+            elif a1 == 1 and a2 >= 2:
+                lb = sum(mult_lik[i] * i / max_cn for i in range(1, max_cn + 1))
+                la = sum(mult_lik[i] * (max_cn - i) / max_cn for i in range(1, max_cn))
+            else:
+                continue  # CN state not suitable for timing
+
+            total = lb + la + 1e-12
+            p_before[s] = lb / total
+            p_after[s] = la / total
+
+        mask = ~np.isnan(p_before)
+        if not mask.any():
             return
-        cn_a1 = cn_a1[0]
-        cn_a2 = cn_a2[0]
-        if not self.mult_lik_dict:
-            self.get_mult_dist()
-        if not self.mult_lik_dict:
-            return
-        if cn_a1 == 0. and cn_a2 >= 2. or cn_a1 == cn_a2 != 1.:
-            max_cn = int(cn_a2)
-            lik_before_gain = sum(self.mult_lik_dict[i] * i / max_cn for i in range(2, max_cn + 1))
-            lik_after_gain = sum(self.mult_lik_dict[i] * (max_cn - i) / max_cn for i in range(2, max_cn)) + self.mult_lik_dict[1]
-        elif cn_a1 == 1. and cn_a2 >= 2.:
-            max_cn = int(cn_a2)
-            lik_before_gain = sum(self.mult_lik_dict[i] * i / max_cn for i in range(1, max_cn + 1))
-            lik_after_gain = sum(self.mult_lik_dict[i] * (max_cn - i) / max_cn for i in range(1, max_cn))
-        else:
-            return
-        total_lik = lik_before_gain + lik_after_gain + 1e-12 # Add small episilon to avoid division by zero
-        p_before_gain = lik_before_gain / total_lik
-        p_after_gain = lik_after_gain / total_lik
+
         pi_cdf = np.cumsum(matched_gain.pi_dist)
-        pi_dist = np.outer((1 - pi_cdf), p_before_gain) + np.outer(pi_cdf, p_after_gain)
+        pi_dist = np.outer(1.0 - pi_cdf, p_before[mask]) + np.outer(pi_cdf, p_after[mask])
         pi_dist = pi_dist * (pi_dist >= 0) + 1e-10
         pi_dist = np.sum(np.log(pi_dist / np.sum(pi_dist, 0)), 1)
         self.pi_dist = np.exp(pi_dist - logsumexp(pi_dist))
