@@ -882,7 +882,7 @@ class League():
             agg = agg.sort_values(by=['median', 'min', 'max'], ascending=True)
         ordered_events = list(agg.index)
         label_order = [self._event_label(e) for e in ordered_events]
-        reversed_ordered_events = reversed(ordered_events)
+        reversed_ordered_events = list(reversed(ordered_events))
 
         n_events = len(ordered_events)
         fig = plt.figure(figsize=(3.6, 0.09 * n_events + 1.5))
