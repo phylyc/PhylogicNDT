@@ -241,11 +241,13 @@ def run_league_model(args):
     ## plotting ##
     league_model_run.plot_league_run(type='odds')
     fig = league_model_run.odds_plot
-    plt.savefig(args.cohort + '.log_odds.pdf', transparent=True, bbox_inches="tight")
+    if fig is not None:
+        plt.savefig(args.cohort + '.log_odds.pdf', transparent=True, bbox_inches="tight")
     # plt.savefig(args.cohort + '.log_odds.png', dpi=300, bbox_inches="tight")
     league_model_run.plot_league_run(type='pos')
     fig = league_model_run.pos_plot
-    plt.savefig(args.cohort + '.positions.pdf', transparent=True, bbox_inches="tight")
+    if fig is not None:
+        plt.savefig(args.cohort + '.positions.pdf', transparent=True, bbox_inches="tight")
     # plt.savefig(args.cohort + '.positions.png', dpi=300, bbox_inches="tight")
 
     ## output ##

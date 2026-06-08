@@ -869,6 +869,10 @@ class League():
             return 0
 
         if not records:
+            if type == 'odds':
+                self.odds_plot = None
+            elif type == 'pos':
+                self.pos_plot = None
             return 0
 
         df = pd.DataFrame(records)
@@ -927,7 +931,7 @@ class League():
 
         y_pos = np.arange(n_events)
         ax1.barh(y_pos, prev_fracs, color=bar_colors, height=0.7, align='center')
-        ax1.set_yticks(y_pos)
+        ax1.set_yticks([])
         ax1.set_yticklabels([])
         ax1.set_ylim(-0.5, n_events - 0.5)
         for i, frac in enumerate(prev_fracs):
