@@ -497,7 +497,7 @@ def build_parser():
                              type=int,
                              action='store',
                              dest='perm_chunk_size',
-                             default=10,
+                             default=8,
                              help='number of permutations per job')
     leaguemodel.add_argument('--percent_subset', '-percent_subset',
                              type=float,

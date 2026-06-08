@@ -173,9 +173,9 @@ class TimingEngine(object):
                         is_clonal = False
                         break
                 eve.is_clonal = is_clonal
-                self.all_cn_events[eve.event_name].append(eve)
+                self.all_cn_events.setdefault(eve.event_name, []).append(eve)
                 if is_clonal:
-                    self.truncal_cn_events[eve.event_name].append(eve)
+                    self.truncal_cn_events.setdefault(eve.event_name, []).append(eve)
 
     def get_focal_cn_events(self, cn_tol=0.20):
         """
@@ -650,6 +650,11 @@ class TimingEngine(object):
                     if not cn_event.is_clonal:
                         cn_event.pi_dist = subclonal_dist.copy()
                         _set_status(cn_event, status='subclonal', source='clonality_rule', reason='event_not_truncal')
+                    elif cn_event.Type.endswith('homdel'):
+                        # Homdel: no local mutations possible; mark as present
+                        cn_event.pi_dist = uniform_dist.copy()
+                        _set_status(cn_event, status='prior_only', source='homdel',
+                                    reason='homdel_no_local_evidence')
                     elif cn_event.Type.endswith('gain'):
                         cn_event.get_pi_dist_for_higher_gain(self.WGD)
                         if cn_event.pi_dist is not None:
@@ -721,6 +726,15 @@ class TimingEngine(object):
 
                 # Preferred path: local likelihood from focal interval mutations
                 if _time_gain_from_local(ev, fuse_with_prior=borrowed_prior):
+                    continue
+
+                # Homdel events cannot be timed from local mutations (no reads
+                # exist in a homozygously deleted region), but they should be
+                # present in the output as identifiable events.
+                if 'homdel' in ev.Type.lower():
+                    ev.pi_dist = uniform_dist.copy()
+                    _set_status(ev, status='prior_only', source='homdel',
+                                reason='homdel_no_local_evidence')
                     continue
 
                 # No local evidence, but explicit borrowing enabled
@@ -930,9 +944,9 @@ class TimingSample(object):
         for state in self.cn_states.values():
             for eve in state.cn_events:
                 if use_concordant_states:
-                    self.concordant_cn_events[eve.event_name].append(eve)
+                    self.concordant_cn_events.setdefault(eve.event_name, []).append(eve)
                 else:
-                    self.cn_events[eve.event_name].append(eve)
+                    self.cn_events.setdefault(eve.event_name, []).append(eve)
 
 
 class TimingWGD(object):
@@ -1001,6 +1015,7 @@ class TimingCNState(object):
     def call_events(self, cn_type_prefix='Arm', wgd=False):
         """
         create cn event instances for events (gain for 1/2, gain and loss for 0/2, two gains for 2/2)
+        Also handles homozygous deletion (0/0) as a single homdel event.
         """
         self.cn_events = []
         baseline = 2. if wgd else 1.
@@ -1016,6 +1031,18 @@ class TimingCNState(object):
             cn_a2 = baseline + 1
         else:
             cn_a2 = round(self.cn_a2)
+
+        # Homozygous deletion: both alleles at 0 — only meaningful for focal events.
+        # Arm-level (0,0) is almost certainly due to inaccurate CN inference and
+        # should be treated as two independent losses (original behavior).
+        if cn_a1 == 0 and cn_a2 == 0 and not wgd and cn_type_prefix == 'Focal':
+            cn_type = cn_type_prefix + '_homdel'
+            ccf_hat = min(baseline, 1.)
+            self.cn_events.append(TimingCNEvent(self.sample_list, self, Type=cn_type, chrN=self.chrN, arm=self.arm,
+                                                copy_number='0/0', allelic_cn=0,
+                                                supporting_muts=self.supporting_muts, ccf_hat=ccf_hat))
+            return
+
         if cn_a1 != baseline:
             cn_type = cn_type_prefix + ('_gain' if self.cn_a1 > baseline else '_loss')
             ccf_hat = min(self.cn_a1 - baseline, 1.) if self.cn_a1 > baseline else min(baseline - self.cn_a1, 1.)
@@ -1097,13 +1124,14 @@ class TimingCNEvent(object):
         if self.Type.startswith('Arm_'):
             return self.Type[4:] + '_' + self.chrN + self.arm
         if self.Type.startswith('Focal_'):
-            # Prefer cytoband naming if available; else fall back to coordinates
-            if self.band_range_str is not None:
+            # Use coordinate-based naming to avoid key collisions when multiple
+            # focal intervals map to the same cytoband(s).
+            if self.start is not None and self.end is not None:
+                coord = f'{self.chrN}:{self.start}-{self.end}'
+            elif self.band_range_str is not None:
                 coord = f'{self.chrN}{self.arm}.{self.band_range_str}'
             else:
-                coord = (f'{self.chrN}{self.arm}:{self.start}-{self.end}'
-                         if self.start is not None and self.end is not None
-                         else f'{self.chrN}{self.arm}')
+                coord = f'{self.chrN}{self.arm}'
             return f'{self.Type}_{coord}'
         raise NotImplementedError('ONLY ARM AND FOCAL EVENTS CURRENTLY SUPPORTED')
 

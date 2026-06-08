@@ -88,7 +88,7 @@ def _dedup_cn_events(cn_events_dict):
     return [ev for ev, _ in seen.values()]
 
 
-def compare_events(timing_engine, drivers=(), uncertainty_bins=5):
+def compare_events(timing_engine, drivers=(), uncertainty_bins=5, uniform_atol=1e-6):
     """Compare event timings using pairwise probabilities from the joint
     distribution over discrete pi bins.
 
@@ -103,6 +103,18 @@ def compare_events(timing_engine, drivers=(), uncertainty_bins=5):
     they remain visible in the comparison table and are counted correctly
     in downstream LeagueModel prevalence.
 
+    Events whose ``pi_dist`` is effectively uniform (e.g., focal losses
+    without WGD anchoring, focal homdels, or focal events that fell
+    through the uniform fallback in time_events) are also recorded as
+    fully-unknown.  A uniform pi_dist carries no locus-specific ordering
+    signal: ``np.outer(uniform, anything)`` produces ~50/50 before/after
+    splits that the LeagueModel would otherwise mistake for genuine
+    pairwise evidence.  Reporting these honestly as ``(0, 0, 1)`` lets
+    the LeagueModel's low-count rescue handle them appropriately.
+
+    Note: the ``subclonal_dist`` (a delta at bin 100, "after everything")
+    is *not* uniform and remains informative.
+
     When multiple CN events share the same ``event_name`` (e.g. two
     gains from a 2/2 arm state), only the event with the most supporting
     mutations is kept to avoid silent overwrites in the output dict.
@@ -112,11 +124,27 @@ def compare_events(timing_engine, drivers=(), uncertainty_bins=5):
         drivers: Iterable of driver gene names.
         uncertainty_bins: Half-width of the near-diagonal band (in pi
             bins) that is counted as *unknown*.  Default 5 (≈ 5 %).
+        uniform_atol: Absolute tolerance for declaring a pi_dist
+            uniform.  A distribution is uniform if every bin is within
+            ``uniform_atol`` of the mean after normalization.
 
     Returns:
         dict mapping ``(event1_name, event2_name)`` to
         ``(p_before, p_after, p_unknown)``.
     """
+    def _is_uninformative(pi_dist):
+        """True if pi_dist is None, empty, zero-sum, or effectively uniform."""
+        if pi_dist is None:
+            return True
+        p = np.asarray(pi_dist, dtype=float)
+        if p.size == 0:
+            return True
+        s = p.sum()
+        if not np.isfinite(s) or s <= 0:
+            return True
+        p = p / s
+        return float(np.max(np.abs(p - p.mean()))) < uniform_atol
+
     all_events = []
     if timing_engine.WGD:
         all_events.append(timing_engine.WGD)
@@ -132,10 +160,8 @@ def compare_events(timing_engine, drivers=(), uncertainty_bins=5):
     comps = {}
 
     for eve1, eve2 in itertools.combinations(all_events, 2):
-        if eve1.pi_dist is None or eve2.pi_dist is None:
-            # Event exists but timing is not estimable – record as fully
-            # unknown so that the event still appears in the comparison
-            # table (and therefore in LeagueModel prevalence counts).
+        # Either event has no informative timing → fully unknown.
+        if _is_uninformative(eve1.pi_dist) or _is_uninformative(eve2.pi_dist):
             comps[(eve1.event_name, eve2.event_name)] = (0.0, 0.0, 1.0)
             continue
 

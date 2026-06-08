@@ -282,8 +282,14 @@ class CopyNumberEvent():
             gl = cn_category.split('_')[1]
             self.event_name = gl + '_' + str(self.chrN) + self.arm
         elif cn_category.startswith('Focal'):
-            gl = cn_category.split('_')[1]
-            self.event_name = gl + '_' + str(chrN) + start.band + ('-' + end.band[1:] if start != end else "") # + ":" + ('a1' if a1 else 'a2')
+            gl = cn_category.split('_')[1]  # 'gain', 'loss', or 'homdel'
+            # Use coordinate-based naming to avoid key collisions when multiple
+            # focal intervals map to the same cytoband(s).
+            if isinstance(start, (int, np.integer)) and isinstance(end, (int, np.integer)):
+                self.event_name = f"{gl}_{chrN}:{start}-{end}"
+            else:
+                # Legacy fallback for Cytoband objects
+                self.event_name = gl + '_' + str(chrN) + start.band + ('-' + end.band[1:] if start != end else "")
         elif cn_category == 'WGD':
             self.event_name = 'WGD'
         else:

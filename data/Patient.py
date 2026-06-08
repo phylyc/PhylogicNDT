@@ -733,6 +733,38 @@ class Patient:
                             lo.append(lo_i)
                         results[allele_key] = (tuple(cn_vec), tuple(hat), tuple(hi), tuple(lo))
 
+                    # ----------------------------------------------------------
+                    # Detect homozygous deletion: at least one sample has both
+                    # alleles at CN=0 in this focal region. Per-sample CCFs are
+                    # preserved, so other samples (neutral, hemizygous loss,
+                    # gain) are represented faithfully in the per-sample event.
+                    # ----------------------------------------------------------
+                    n_samp = len(self.sample_list)
+                    cn_a1, hat_a1, hi_a1, lo_a1 = results.get('a1', ((1,)*n_samp, (0.,)*n_samp, (0.,)*n_samp, (0.,)*n_samp))
+                    cn_a2, hat_a2, hi_a2, lo_a2 = results.get('a2', ((1,)*n_samp, (0.,)*n_samp, (0.,)*n_samp, (0.,)*n_samp))
+
+                    # Any sample with CN=0 on BOTH alleles → homdel carrier
+                    homdel_carriers = {i for i in range(n_samp) if cn_a1[i] == 0 and cn_a2[i] == 0}
+                    is_homdel = len(homdel_carriers) > 0
+
+                    if is_homdel and R.get('type') in ('DEL', 'DELETION', None):
+                        # Per-sample CN: 0 for carriers, 1 (neutral) for non-carriers.
+                        # Carriers contribute their homdel CCF; non-carriers get 0.
+                        homdel_cns = tuple(0 if i in homdel_carriers else 1 for i in range(n_samp))
+                        homdel_hat = tuple(max(hat_a1[i], hat_a2[i]) if i in homdel_carriers else 0.
+                                          for i in range(n_samp))
+                        homdel_hi = tuple(max(hi_a1[i], hi_a2[i]) if i in homdel_carriers else 0.
+                                         for i in range(n_samp))
+                        homdel_lo = tuple(max(lo_a1[i], lo_a2[i]) if i in homdel_carriers else 0.
+                                         for i in range(n_samp))
+                        self._add_cn_event_to_samples(chrom=chrom, start=s0, end=e0, arm=arm_lbl,
+                                                     cns=homdel_cns, cn_category='Focal_homdel',
+                                                     ccf_hat=homdel_hat, ccf_high=homdel_hi, ccf_low=homdel_lo,
+                                                     a1=True, dupe=False)
+                        # Note: do NOT `continue` here — also let the per-allele
+                        # loss/gain emission below run for non-carrier samples.
+                        # The Focal_homdel and Focal_loss events are independent.
+
                     # emit an event for each allele with any non-neutral evidence
                     for allele_key, (cn_vec, hat, hi, lo) in results.items():
                         if all(cn == 1 for cn in cn_vec):
@@ -758,7 +790,7 @@ class Patient:
                             is_gain = "gain" in cn_category
                             is_loss = not is_gain
                             dupe = is_gain and a2 or is_loss and a1
-                            self._add_cn_event_to_samples(chrom=chrom, start=min(bands), end=max(bands), arm=arm_lbl, cns=cn_vec, cn_category=cn_category, ccf_hat=hat, ccf_high=hi, ccf_low=lo, a1=a1, dupe=dupe)
+                            self._add_cn_event_to_samples(chrom=chrom, start=s0, end=e0, arm=arm_lbl, cns=cn_vec, cn_category=cn_category, ccf_hat=hat, ccf_high=hi, ccf_low=lo, a1=a1, dupe=dupe)
 
     def get_arm_level_cn_events(self):
         n_samples = len(self.sample_list)
