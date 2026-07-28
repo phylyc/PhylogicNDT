@@ -261,11 +261,21 @@ class TumorSample:
 
         # allow buffers.
         file_in = (gzip.open(filen, mode="rt") if filen.endswith(".gz") else open(filen)) if type(filen) == str else filen
+        label = filen if type(filen) == str else getattr(file_in, 'name', '<buffer>')
 
+        # Skip the leading comment block (a MAF carries a VCF-style '#' header) and any
+        # blank lines. readline() returns '' at EOF, so guard on that: a file that is
+        # entirely comments would otherwise index into an empty string.
         header = file_in.readline()
-        while header[0] == "#" or not header.strip():
-            header = header.readline()
-        header = header.strip().split("\t")
+        header_line_no = 1
+        while header and (header.startswith("#") or not header.strip()):
+            header = file_in.readline()
+            header_line_no += 1
+        if not header:
+            raise ValueError("{}: no header line found".format(label))
+        # strip('\n\r'), not strip(): a trailing tab means a real (empty-named) column,
+        # and dropping it here while keeping it in the data rows shifts every field.
+        header = header.strip('\n\r').split("\t")
         h = collections.OrderedDict([[x[1], x[0]] for x in enumerate(header)])
 
         mutation_list = []
@@ -284,10 +294,20 @@ class TumorSample:
             ccf_bins_location = [column_loc[1] for column_loc in h.items() if
                                  "ccf_0." in column_loc[0] or "ccf_1." in column_loc[0]]
 
-        for line in file_in:
-            spl = line.strip('\n\r').split('\t')
-            if not spl:
+        for line_no, line in enumerate(file_in, start=header_line_no + 1):
+            if not line.strip():
                 continue
+            spl = line.strip('\n\r').split('\t')
+            # Every column below is addressed by index, so a row that is not the width
+            # of the header either raises IndexError deep in the parse or -- worse --
+            # silently reads a neighbouring column. A non-rectangular MAF means the
+            # tool that wrote it broke (an unquoted tab or newline in an annotation
+            # field will do it); say so here instead of guessing.
+            if len(spl) != len(header):
+                raise ValueError(
+                    "{}: line {} has {} fields but the header has {}. "
+                    "The file is not a rectangular TSV; fix the tool that wrote it.".format(
+                        label, line_no, len(spl), len(header)))
             if "Chromosome" in h:
                 std_param = [spl[h["Chromosome"]], spl[h["Start_position"]], spl[h["Reference_Allele"]],
                              spl[h["Tumor_Seq_Allele2"]]]
