@@ -428,32 +428,54 @@ def build_parser():
                              help='TSV File of purity values for each sample, and optionally a 2/3/4 column with a, b and n values. Number of samples needs to match ns.')
     simulations.set_defaults(func=PhylogicSim.Simulations.run_tool)
 
+    timing_parent = argparse.ArgumentParser(add_help=False)
+    timing_parent.add_argument('-min_supporting_muts',
+                               type=int,
+                               action='store',
+                               dest='min_supporting_muts',
+                               default=3,
+                               help='Minimum number of supporting mutations to time a copy number event')
+    timing_parent.add_argument('--grid_size', '-g',
+                               type=int,
+                               action='store',
+                               dest='grid_size',
+                               default=101,
+                               help='num ccf bins, must match for txt input, otherwise may be any number that grid in absolute RData is divisble by.')
+    timing_parent.add_argument('--run_comparisons',
+                               action='store_true',
+                               dest='run_comparisons',
+                               default=False,
+                               help='Also write the legacy driver/CN timing comparison table and HTML report.')
+
     timing = subparsers.add_parser("Timing", help="Time somatic events in one or multiple samples.",
-                                   parents=[base_parser])
-    timing.add_argument('-min_supporting_muts',
-                        type=int,
-                        action='store',
-                        dest='min_supporting_muts',
-                        default=3,
-                        help='Minimum number of supporting mutations to time a copy number event')
-    # num ccf bins
-    timing.add_argument('--grid_size', '-g',
-                        type=int,
-                        action='store',
-                        dest='grid_size',
-                        default=101,
-                        help='num ccf bins, must match for txt input, otherwise may be any number that grid in absolute RData is divisble by.')
+                                   parents=[base_parser, timing_parent])
     timing.set_defaults(func=SinglePatientTiming.SinglePatientTiming.run_tool)
 
     single_patient_timing = subparsers.add_parser("SinglePatientTiming", help="Time somatic events in one or multiple samples.",
-                                   parents=[base_parser])
-    single_patient_timing.add_argument('-min_supporting_muts',
-                        type=int,
-                        action='store',
-                        dest='min_supporting_muts',
-                        default=3,
-                        help='Minimum number of supporting mutations to time a copy number event')
+                                   parents=[base_parser, timing_parent])
     single_patient_timing.set_defaults(func=SinglePatientTiming.SinglePatientTiming.run_tool)
+
+    timing_comparison = subparsers.add_parser("TimingComparison",
+                                              help="Write timing comparisons from a Timing .timing.tsv file.",
+                                              parents=[base_parser])
+    timing_comparison.add_argument('--timing_tsv',
+                                   type=str,
+                                   action='store',
+                                   dest='timing_tsv',
+                                   default=None,
+                                   help='Timing TSV from the Timing command. Defaults to <indiv_id>.timing.tsv')
+    timing_comparison.add_argument('--event_file',
+                                   type=str,
+                                   action='store',
+                                   dest='event_file',
+                                   default=None,
+                                   help='File containing selected Event Name values to compare, one per line.')
+    timing_comparison.add_argument('--compare_all',
+                                   action='store_true',
+                                   dest='compare_all',
+                                   default=False,
+                                   help='Compare every event in the timing TSV. This can be very large.')
+    timing_comparison.set_defaults(func=SinglePatientTiming.SinglePatientTiming.run_timing_comparison_tool)
 
     leaguemodel = subparsers.add_parser("LeagueModel", help="Time somatic events across a cohort.",
                                          parents=[base_parser])

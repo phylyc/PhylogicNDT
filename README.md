@@ -108,6 +108,18 @@ To run SinglePatientTiming:
 
     ./PhylogicNDT.py Timing -i Indiv_ID -sif Patient.sif
 
+This writes `Indiv_ID.timing.tsv` for all timed somatic events. Timing
+comparisons are a separate step so downstream tests can first select the
+events of interest:
+
+    ./PhylogicNDT.py TimingComparison -i Indiv_ID --timing_tsv Indiv_ID.timing.tsv --event_file selected_events.txt
+
+`selected_events.txt` should contain one event selector per line. Exact
+`Event Name` values from the timing TSV are accepted, as are LeagueModel-style
+mutation class selectors such as `TP53:path` and arm events such as `loss_17p`.
+To also write the legacy driver/CN comparison table during the timing run, pass
+`--run_comparisons`.
+
 ### LeagueModel
 LeagueModel requires an input of comparison tables.
 The comparison tables should be the output of SinglePatientTiming ending in ".comp.tsv"

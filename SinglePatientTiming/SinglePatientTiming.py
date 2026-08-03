@@ -2,9 +2,13 @@ import logging
 import numpy as np
 import pandas as pd
 import itertools
+from collections import namedtuple
 from data.Patient import Patient
+from LeagueModel.LeagueModelData import event_matches_selector, parse_harmonized_point_event
 from SinglePatientTiming import TimingEngine
 from output.PhylogicOutput import PhylogicOutput
+
+TimedEvent = namedtuple('TimedEvent', ['event_name', 'pi_dist'])
 
 
 def run_tool(args):
@@ -59,11 +63,116 @@ def run_tool(args):
     timing_engine.time_events()
     phylogicoutput = PhylogicOutput()
     phylogicoutput.write_timing_tsv(timing_engine)
-    with open(args.driver_genes_file) as f:
-        driver_genes = [line.strip() for line in f]
-    comps = compare_events(timing_engine, drivers=driver_genes)
-    phylogicoutput.write_comp_table(args.indiv_id, comps)
-    phylogicoutput.generate_html_from_timing(args.indiv_id, timing_engine, comps, drivers=driver_genes)
+
+    if args.run_comparisons:
+        with open(args.driver_genes_file) as f:
+            driver_genes = [line.strip() for line in f]
+        comps = compare_events(timing_engine, drivers=driver_genes)
+        phylogicoutput.write_comp_table(args.indiv_id, comps)
+        phylogicoutput.generate_html_from_timing(args.indiv_id, timing_engine, comps, drivers=driver_genes)
+
+
+def run_timing_comparison_tool(args):
+    timing_tsv = args.timing_tsv or args.indiv_id + '.timing.tsv'
+    events = read_timed_events(timing_tsv, event_file=args.event_file, compare_all=args.compare_all)
+    comps = compare_event_list(events)
+    PhylogicOutput.write_comp_table(args.indiv_id, comps)
+
+
+def read_timed_events(timing_tsv, event_file=None, compare_all=False):
+    timing_df = pd.read_csv(timing_tsv, sep='\t')
+    pi_cols = ['pi_{}'.format(float(x) / 100) for x in range(101)]
+    missing_cols = [col for col in ['Event Name'] + pi_cols if col not in timing_df.columns]
+    if missing_cols:
+        raise ValueError('Missing columns in timing TSV: {}'.format(', '.join(missing_cols)))
+    class_cols = [
+        col for col in timing_df.columns
+        if col.strip().lower() in ('event class', 'event_class', 'class', 'mutation_class', 'coding_class')
+    ]
+    class_col = class_cols[0] if class_cols else None
+
+    if event_file:
+        with open(event_file) as f:
+            selected_events = []
+            seen_selected_events = set()
+            for line in f:
+                event_name = line.strip().split('\t')[0]
+                if not event_name or event_name in seen_selected_events:
+                    continue
+                selected_events.append(event_name)
+                seen_selected_events.add(event_name)
+    elif compare_all:
+        selected_events = list(timing_df['Event Name'])
+    else:
+        raise ValueError('Provide --event_file with selected events, or pass --compare_all explicitly.')
+
+    timing_by_event = {}
+    duplicate_event_counts = {}
+    for _, row in timing_df.iterrows():
+        event_name = row['Event Name']
+        pi = pd.to_numeric(row[pi_cols], errors='coerce').to_numpy(dtype=float)
+        event_class = None
+        if class_col is not None and row[class_col] == row[class_col]:
+            event_class = str(row[class_col]).strip() or None
+        pi_dist = None if np.isnan(pi).all() else pi
+
+        if event_name in timing_by_event:
+            duplicate_event_counts[event_name] = duplicate_event_counts.get(event_name, 1) + 1
+            prev_pi_dist, prev_event_class = timing_by_event[event_name]
+            if prev_pi_dist is None and pi_dist is not None:
+                timing_by_event[event_name] = (pi_dist, event_class or prev_event_class)
+            continue
+
+        timing_by_event[event_name] = (pi_dist, event_class)
+
+    if duplicate_event_counts:
+        duplicate_msg = ', '.join(
+            '{} ({} rows)'.format(event_name, count)
+            for event_name, count in sorted(duplicate_event_counts.items())[:20]
+        )
+        if len(duplicate_event_counts) > 20:
+            duplicate_msg += ', ...'
+        logging.warning(
+            'Duplicate Event Name rows in timing TSV were deduplicated for comparisons: {}'.format(duplicate_msg)
+        )
+
+    if compare_all and not event_file:
+        return [TimedEvent(event_name, pi_dist) for event_name, (pi_dist, _) in timing_by_event.items()]
+
+    events = []
+    selected_raw_events = set()
+    missing_selectors = []
+    class_selectors_without_classes = []
+    for selector in selected_events:
+        matched_events = []
+        for event_name, (pi_dist, event_class) in timing_by_event.items():
+            if event_matches_selector(event_name, selector, event_class=event_class):
+                matched_events.append((event_name, pi_dist))
+
+        if not matched_events:
+            missing_selectors.append(selector)
+            continue
+
+        if parse_harmonized_point_event(selector) is not None and class_col is None:
+            class_selectors_without_classes.append(selector)
+
+        for event_name, pi_dist in matched_events:
+            if event_name in selected_raw_events:
+                continue
+            events.append(TimedEvent(event_name, pi_dist))
+            selected_raw_events.add(event_name)
+
+    if missing_selectors:
+        logging.warning('Events not found in timing TSV and skipped: {}'.format(', '.join(sorted(missing_selectors))))
+    if class_selectors_without_classes:
+        logging.warning(
+            'Timing TSV has no event class column; matched class selectors by gene only: {}'.format(
+                ', '.join(sorted(set(class_selectors_without_classes)))
+            )
+        )
+    if len(events) < 2:
+        logging.warning('Fewer than two selected events found; writing an empty timing comparison table.')
+    return events
 
 
 def _dedup_cn_events(cn_events_dict):
@@ -88,7 +197,7 @@ def _dedup_cn_events(cn_events_dict):
     return [ev for ev, _ in seen.values()]
 
 
-def compare_events(timing_engine, drivers=(), uncertainty_bins=5, uniform_atol=1e-6):
+def compare_event_list(all_events, uncertainty_bins=5, uniform_atol=1e-6):
     """Compare event timings using pairwise probabilities from the joint
     distribution over discrete pi bins.
 
@@ -145,18 +254,6 @@ def compare_events(timing_engine, drivers=(), uncertainty_bins=5, uniform_atol=1
         p = p / s
         return float(np.max(np.abs(p - p.mean()))) < uniform_atol
 
-    all_events = []
-    if timing_engine.WGD:
-        all_events.append(timing_engine.WGD)
-
-    all_events.extend(_dedup_cn_events(timing_engine.all_cn_events))
-    all_events.extend(
-        mut for mut in timing_engine.mutations.values()
-        if mut.prot_change
-        and mut.gene in drivers
-        and (mut.prot_change[0] != mut.prot_change[-1] or not mut.prot_change[-1].isalpha())
-    )
-
     comps = {}
 
     for eve1, eve2 in itertools.combinations(all_events, 2):
@@ -202,3 +299,19 @@ def compare_events(timing_engine, drivers=(), uncertainty_bins=5, uniform_atol=1
         comps[(eve1.event_name, eve2.event_name)] = (p_before, p_after, p_unknown)
 
     return comps
+
+
+def compare_events(timing_engine, drivers=(), uncertainty_bins=5, uniform_atol=1e-6):
+    """Compare the default event set: WGD, CN events, and non-silent drivers."""
+    all_events = []
+    if timing_engine.WGD:
+        all_events.append(timing_engine.WGD)
+
+    all_events.extend(_dedup_cn_events(timing_engine.all_cn_events))
+    all_events.extend(
+        mut for mut in timing_engine.mutations.values()
+        if mut.prot_change
+        and mut.gene in drivers
+        and (mut.prot_change[0] != mut.prot_change[-1] or not mut.prot_change[-1].isalpha())
+    )
+    return compare_event_list(all_events, uncertainty_bins=uncertainty_bins, uniform_atol=uniform_atol)

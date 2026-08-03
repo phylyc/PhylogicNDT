@@ -101,6 +101,51 @@ def _legacy_event_gene(event):
     return event.split('_')[0].split(':')[0]
 
 
+def is_point_mutation_event(event):
+    event = str(event)
+    if event == 'WGD':
+        return False
+    if event.split('_')[0] in ['loss', 'gain', 'homdel', 'Focal']:
+        return False
+    return True
+
+
+def parse_harmonized_point_event(event):
+    event = str(event).strip()
+    if ':' not in event:
+        return None
+    gene, event_class = event.split(':', 1)
+    if not gene or not event_class or ':' in event_class:
+        return None
+    if not re.match(r'^[A-Za-z][A-Za-z0-9_.-]*$', gene):
+        return None
+    return gene, event_class
+
+
+def event_matches_selector(raw_event, selector, event_class=None, mutation_event_resolution='gene'):
+    raw_event = str(raw_event)
+    selector = str(selector).strip()
+    if raw_event == selector:
+        return True
+
+    parsed_selector = parse_harmonized_point_event(selector)
+    if parsed_selector is not None:
+        if not is_point_mutation_event(raw_event):
+            return False
+        gene, selector_class = parsed_selector
+        parsed_raw = _classify_point_mutation(raw_event)
+        raw_gene = parsed_raw.get('gene')
+        if _normalize_gene_token(raw_gene) != _normalize_gene_token(gene):
+            return False
+        if event_class is None:
+            return True
+        return str(event_class).strip().lower() == selector_class.strip().lower()
+
+    if mutation_event_resolution == 'gene':
+        return _legacy_event_gene(raw_event) == selector
+    return False
+
+
 def _parse_point_event(event):
     event = str(event).strip()
     if '_' in event:
@@ -372,12 +417,7 @@ class League():
         return samps_w_both, samps_w_event1_only, samps_w_event2_only, samps_w_neither
 
     def _is_point_mutation_event(self, event):
-        event = str(event)
-        if event in self.arm_CNVs or event == 'WGD':
-            return False
-        if event.split('_')[0] in ['loss', 'gain', 'homdel', 'Focal']:
-            return False
-        return True
+        return is_point_mutation_event(event)
 
     def _is_hotspot_event(self, gene, mutation_token):
         gene = _normalize_gene_token(gene) if gene is not None else None

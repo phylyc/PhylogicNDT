@@ -49,13 +49,13 @@ def main():
     # SIF for timing of mutations in patient based on clustering results
     df = pd.DataFrame({
         "sample_id": sample_ids,
-        "maf_fn": [f"{args.patient_id}.mut_ccfs.txt"] * n,
+        "maf_fn": [f"{args.patient_id}.mut_ccfs.txt.gz"] * n,
         "seg_fn": seg_fns,
         "purity": purities,
         "timepoint": timepoints,
         "tmb": tmb
     })
-    df.to_csv(args.outfile + ".timing.txt", sep="\t", index=False)
+    df.to_csv(args.outfile + ".timing.txt.gz", sep="\t", index=False)
 
 
 if __name__ == "__main__":
