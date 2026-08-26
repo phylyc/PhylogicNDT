@@ -128,6 +128,14 @@ To run LeagueModel:
 
     ./PhylogicNDT.py LeagueModel -cohort Cohort -comps comp1 comp2 ... compN
 
+LeagueModel also has an optional adaptive posterior-refinement mode for
+diagnosing and recalibrating local rank uncertainty:
+
+    ./PhylogicNDT.py LeagueModel -cohort Cohort -comparison_fn cohort.comparisons.tsv.gz --adaptive_refinement
+
+See `LEAGUEMODEL_ADAPTIVE_REFINEMENT_AUDIT.md` for the design rationale,
+double-counting policy, and diagnostic outputs.
+
 Alternatively, one can use a single aggregated table. The table should have the following columns:
 
     sample  event1  event2  p_event1_win    p_event2_win    unknown

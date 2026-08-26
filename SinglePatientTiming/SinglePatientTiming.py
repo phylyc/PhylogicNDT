@@ -80,7 +80,7 @@ def run_timing_comparison_tool(args):
 
 
 def read_timed_events(timing_tsv, event_file=None, compare_all=False):
-    timing_df = pd.read_csv(timing_tsv, sep='\t')
+    timing_df = pd.read_csv(timing_tsv, sep='\t', low_memory=False)
     pi_cols = ['pi_{}'.format(float(x) / 100) for x in range(101)]
     missing_cols = [col for col in ['Event Name'] + pi_cols if col not in timing_df.columns]
     if missing_cols:

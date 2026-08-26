@@ -11,6 +11,7 @@ import operator
 import itertools
 import copy
 import logging
+import time
 
 _SINGLE_RESIDUE_EVENT_RE = re.compile(r'^p\.([A-Z\*])(\d+)([A-Z\*])$')
 _INT_TOKEN_RE = re.compile(r'(\d+)')
@@ -144,6 +145,296 @@ def event_matches_selector(raw_event, selector, event_class=None, mutation_event
     if mutation_event_resolution == 'gene':
         return _legacy_event_gene(raw_event) == selector
     return False
+
+
+def make_fractional_refinement_windows(max_depth=1):
+    """Return overlapping rank-quantile windows for adaptive refinement."""
+    windows = []
+    parents = [(0.0, 1.0, 'root')]
+    window_index = 0
+    for level in range(1, int(max_depth) + 1):
+        next_parents = []
+        seen = set()
+        for start, end, parent_id in parents:
+            width = end - start
+            if width <= 0:
+                continue
+            proposals = (
+                (start, start + 0.5 * width),
+                (start + 0.25 * width, start + 0.75 * width),
+                (start + 0.5 * width, end),
+            )
+            for w_start, w_end in proposals:
+                w_start = max(0.0, min(1.0, float(w_start)))
+                w_end = max(0.0, min(1.0, float(w_end)))
+                key = (level, round(w_start, 6), round(w_end, 6))
+                if w_end <= w_start or key in seen:
+                    continue
+                seen.add(key)
+                window_id = 'L{}_W{}'.format(level, window_index)
+                windows.append({
+                    'window_id': window_id,
+                    'level': level,
+                    'parent_id': parent_id,
+                    'start_q': w_start,
+                    'end_q': w_end,
+                })
+                next_parents.append((w_start, w_end, window_id))
+                window_index += 1
+        parents = next_parents
+    return windows
+
+
+def summarize_position_posterior(event_positions, events):
+    """Summarize event rank posterior samples in normalized rank space."""
+    n_events = len(events)
+    denom = max(float(n_events - 1), 1.0)
+    summaries = {}
+    for event in events:
+        pos = np.asarray(event_positions.get(event, []), dtype=float)
+        if pos.size == 0:
+            summaries[event] = {
+                'event': event,
+                'n_samples': 0,
+                'median_rank': np.nan,
+                'rank_low_90': np.nan,
+                'rank_high_90': np.nan,
+                'median_q': np.nan,
+                'q_low_90': np.nan,
+                'q_high_90': np.nan,
+                'q_samples': np.array([]),
+            }
+            continue
+        q = (pos - 1.0) / denom
+        summaries[event] = {
+            'event': event,
+            'n_samples': int(pos.size),
+            'median_rank': float(np.median(pos)),
+            'rank_low_90': float(np.quantile(pos, 0.05)),
+            'rank_high_90': float(np.quantile(pos, 0.95)),
+            'median_q': float(np.median(q)),
+            'q_low_90': float(np.quantile(q, 0.05)),
+            'q_high_90': float(np.quantile(q, 0.95)),
+            'q_samples': q,
+        }
+    return summaries
+
+
+def window_membership_from_posterior(position_summary, windows, support_threshold=0.05):
+    """Assign events to windows by posterior rank support."""
+    memberships = []
+    for window in windows:
+        start_q = window['start_q']
+        end_q = window['end_q']
+        for event, summary in position_summary.items():
+            q = summary['q_samples']
+            if q.size == 0:
+                support = 0.0
+            else:
+                support = float(np.mean((q >= start_q) & (q <= end_q)))
+            if support >= support_threshold:
+                row = dict(window)
+                row.update({
+                    'event': event,
+                    'support': support,
+                    'selected': True,
+                })
+                memberships.append(row)
+    return memberships
+
+
+def pairwise_from_position_samples(event_positions, events, source='global', window_id=None, weight=1.0):
+    """Convert sampled event positions to pairwise before/after probabilities."""
+    records = []
+    for event1, event2 in itertools.combinations(events, 2):
+        pos1 = np.asarray(event_positions.get(event1, []), dtype=float)
+        pos2 = np.asarray(event_positions.get(event2, []), dtype=float)
+        n = min(pos1.size, pos2.size)
+        if n == 0:
+            continue
+        pos1 = pos1[:n]
+        pos2 = pos2[:n]
+        p12 = float(np.mean(pos1 < pos2))
+        p21 = float(np.mean(pos2 < pos1))
+        ptie = max(0.0, 1.0 - p12 - p21)
+        records.append({
+            'event1': event1,
+            'event2': event2,
+            'p_event1_before_event2': p12,
+            'p_event2_before_event1': p21,
+            'p_tie': ptie,
+            'n_position_samples': int(n),
+            'source': source,
+            'window_id': window_id,
+            'weight': float(weight),
+        })
+    return records
+
+
+def aggregate_pairwise_estimates(global_pairwise, local_pairwise):
+    """Use local mixtures where available; otherwise fall back to global."""
+    final = {}
+    for rec in global_pairwise:
+        pair = tuple(sorted([rec['event1'], rec['event2']]))
+        final[pair] = dict(rec)
+        final[pair]['estimator_source'] = 'global'
+        final[pair]['n_local_windows'] = 0
+        final[pair]['local_weight'] = 0.0
+
+    grouped_local = {}
+    for rec in local_pairwise:
+        pair = tuple(sorted([rec['event1'], rec['event2']]))
+        grouped_local.setdefault(pair, []).append(rec)
+
+    for pair, recs in grouped_local.items():
+        total_weight = sum(max(float(r.get('weight', 0.0)), 0.0) for r in recs)
+        if total_weight <= 0:
+            continue
+        base_event1, base_event2 = pair
+        p12 = 0.0
+        p21 = 0.0
+        ptie = 0.0
+        n_samples = 0
+        for rec in recs:
+            w = max(float(rec.get('weight', 0.0)), 0.0) / total_weight
+            if rec['event1'] == base_event1:
+                p12 += w * rec['p_event1_before_event2']
+                p21 += w * rec['p_event2_before_event1']
+            else:
+                p12 += w * rec['p_event2_before_event1']
+                p21 += w * rec['p_event1_before_event2']
+            ptie += w * rec['p_tie']
+            n_samples += int(rec.get('n_position_samples', 0))
+        final[pair] = {
+            'event1': base_event1,
+            'event2': base_event2,
+            'p_event1_before_event2': p12,
+            'p_event2_before_event1': p21,
+            'p_tie': ptie,
+            'n_position_samples': n_samples,
+            'source': 'local_mixture',
+            'window_id': ','.join(sorted({str(r.get('window_id')) for r in recs})),
+            'weight': total_weight,
+            'estimator_source': 'local_mixture',
+            'n_local_windows': len(recs),
+            'local_weight': total_weight,
+        }
+    return list(final.values())
+
+
+def fit_bradley_terry_scores(pairwise_records, events, l2_penalty=1e-3):
+    """Fit centered Bradley-Terry scores from pairwise before probabilities."""
+    from scipy.optimize import minimize
+    from scipy.special import expit
+
+    events = list(events)
+    if not events:
+        return []
+    event_index = {event: i for i, event in enumerate(events)}
+    if len(events) == 1:
+        return [{
+            'event': events[0],
+            'bt_score': 0.0,
+            'bt_score_centered': 0.0,
+            'bt_optimizer_success': True,
+            'bt_optimizer_message': 'single_event',
+            'bt_objective': 0.0,
+            'bt_gradient_norm': 0.0,
+        }]
+
+    idx1 = []
+    idx2 = []
+    p_before = []
+    weights = []
+    for rec in pairwise_records:
+        e1 = rec['event1']
+        e2 = rec['event2']
+        if e1 not in event_index or e2 not in event_index:
+            continue
+        p12 = np.clip(float(rec['p_event1_before_event2']), 1e-6, 1.0 - 1e-6)
+        p21 = np.clip(float(rec['p_event2_before_event1']), 1e-6, 1.0 - 1e-6)
+        total = p12 + p21
+        if total <= 0:
+            continue
+        p12 = p12 / total
+        weight = max(float(rec.get('weight', 1.0)), 1.0)
+        idx1.append(event_index[e1])
+        idx2.append(event_index[e2])
+        p_before.append(p12)
+        weights.append(weight)
+
+    if not idx1:
+        return [
+            {
+                'event': event,
+                'bt_score': 0.0,
+                'bt_score_centered': 0.0,
+                'bt_optimizer_success': False,
+                'bt_optimizer_message': 'no_pairwise_records',
+                'bt_objective': 0.0,
+                'bt_gradient_norm': 0.0,
+            }
+            for event in events
+        ]
+
+    idx1 = np.asarray(idx1, dtype=int)
+    idx2 = np.asarray(idx2, dtype=int)
+    p_before = np.asarray(p_before, dtype=float)
+    weights = np.asarray(weights, dtype=float)
+    n_events = len(events)
+    logging.info(
+        'fitting Bradley-Terry scores for %d event(s), %d pairwise estimate(s)',
+        n_events, len(idx1),
+    )
+
+    def objective_and_gradient(scores):
+        scores = np.asarray(scores, dtype=float)
+        delta = scores[idx1] - scores[idx2]
+        # soft-label Bernoulli cross entropy in log-space
+        nll = np.sum(weights * (np.logaddexp(0.0, delta) - p_before * delta))
+
+        centered = scores - np.mean(scores)
+        nll += float(l2_penalty) * np.sum(centered ** 2)
+
+        pair_grad = weights * (expit(delta) - p_before)
+        grad = np.zeros(n_events, dtype=float)
+        np.add.at(grad, idx1, pair_grad)
+        np.add.at(grad, idx2, -pair_grad)
+        grad += 2.0 * float(l2_penalty) * centered
+        return float(nll), grad
+
+    start_time = time.time()
+    res = minimize(
+        objective_and_gradient,
+        np.zeros(n_events, dtype=float),
+        jac=True,
+        method='L-BFGS-B',
+        options={'maxiter': 1000},
+    )
+    if not res.success:
+        logging.warning('Bradley-Terry optimizer did not report convergence: %s', res.message)
+
+    scores = res.x if np.all(np.isfinite(res.x)) else np.zeros(n_events, dtype=float)
+    scores = scores - np.mean(scores)
+    objective, gradient = objective_and_gradient(scores)
+    gradient_norm = float(np.linalg.norm(gradient))
+    logging.info(
+        'Bradley-Terry fit completed in %.1fs; success=%s; objective=%.6g; gradient_norm=%.6g; message=%s',
+        time.time() - start_time, bool(res.success), float(objective), gradient_norm, res.message,
+    )
+
+    return [
+        {
+            'event': event,
+            'bt_score': float(scores[event_index[event]]),
+            'bt_score_centered': float(scores[event_index[event]]),
+            'bt_optimizer_success': bool(res.success),
+            'bt_optimizer_message': str(res.message),
+            'bt_objective': float(objective),
+            'bt_gradient_norm': gradient_norm,
+        }
+        for event in events
+    ]
 
 
 def _parse_point_event(event):
@@ -864,6 +1155,175 @@ class League():
             self.odds_full_run[event] = {'odds_early':odds_dict[event]['odds_early'],
                                          'odds_late':odds_dict[event]['odds_late']}
         self.full_event_prev = copy.deepcopy(self.event_prev)
+
+    def _run_subset_position_samples(self, events, num_seasons, samples=None):
+        """Run a local league subset and return position samples without
+        leaving the global League object mutated to that subset."""
+        saved_state = {
+            'final_event_list': copy.deepcopy(self.final_event_list),
+            'event_positions': copy.deepcopy(getattr(self, 'event_positions', {})),
+            'event_pairs': copy.deepcopy(getattr(self, 'event_pairs', {})),
+            'event_prev': copy.deepcopy(getattr(self, 'event_prev', {})),
+            'seasons': copy.deepcopy(getattr(self, 'seasons', [])),
+            'num_seasons': getattr(self, 'num_seasons', None),
+        }
+        try:
+            self.final_event_list = list(events)
+            self.run_permutation(num_seasons=num_seasons, samples=samples, final_event_list=list(events))
+            return copy.deepcopy(self.event_positions)
+        finally:
+            self.final_event_list = saved_state['final_event_list']
+            self.event_positions = saved_state['event_positions']
+            self.event_pairs = saved_state['event_pairs']
+            self.event_prev = saved_state['event_prev']
+            self.seasons = saved_state['seasons']
+            if saved_state['num_seasons'] is None:
+                if hasattr(self, 'num_seasons'):
+                    delattr(self, 'num_seasons')
+            else:
+                self.num_seasons = saved_state['num_seasons']
+
+    def run_adaptive_refinement(self, samples=None, local_num_seasons=1000, max_depth=1,
+                                support_threshold=0.05, min_window_events=4,
+                                bt_l2_penalty=1e-3):
+        """Run posterior-support local refinement over fractional rank windows.
+
+        The current global ``event_positions`` are treated as the scaffold and
+        fallback estimator. Local windows refine pairwise probabilities only for
+        pairs that co-occur in posterior-supported windows.
+        """
+        start_time = time.time()
+        events = list(self.final_event_list)
+        global_positions = copy.deepcopy(getattr(self, 'event_positions', {}))
+        logging.info(
+            'starting adaptive refinement: events=%d, local_num_seasons=%d, max_depth=%d, support_threshold=%.3f, min_window_events=%d',
+            len(events), int(local_num_seasons), int(max_depth), float(support_threshold), int(min_window_events),
+        )
+        if not events or not global_positions:
+            logging.warning('adaptive refinement skipped: no events or no global position samples')
+            return {
+                'position_summary': [],
+                'windows': [],
+                'memberships': [],
+                'local_pairwise': [],
+                'global_pairwise': [],
+                'refined_pairwise': [],
+                'bt_scores': [],
+            }
+
+        position_summary = summarize_position_posterior(global_positions, events)
+        windows = make_fractional_refinement_windows(max_depth=max_depth)
+        memberships = window_membership_from_posterior(
+            position_summary,
+            windows,
+            support_threshold=support_threshold,
+        )
+        logging.info(
+            'adaptive refinement built %d window(s) and %d event-window membership(s)',
+            len(windows), len(memberships),
+        )
+        memberships_by_window = {}
+        for membership in memberships:
+            memberships_by_window.setdefault(membership['window_id'], []).append(membership)
+
+        global_pairwise = pairwise_from_position_samples(global_positions, events, source='global')
+        local_pairwise = []
+        executed_windows = []
+
+        executable_windows = []
+        for window in windows:
+            window_memberships = memberships_by_window.get(window['window_id'], [])
+            window_events = [m['event'] for m in sorted(window_memberships, key=lambda x: x['event'])]
+            window['n_events'] = len(window_events)
+            if len(window_events) < min_window_events or len(window_events) >= len(events):
+                window['executed'] = False
+                window['skip_reason'] = 'too_few_or_all_events'
+                continue
+            executable_windows.append((window, window_events, window_memberships))
+
+        logging.info(
+            'adaptive refinement will execute %d/%d window(s); skipped %d',
+            len(executable_windows), len(windows), len(windows) - len(executable_windows),
+        )
+
+        completed_window_times = []
+        for run_idx, (window, window_events, window_memberships) in enumerate(executable_windows, start=1):
+            window_start = time.time()
+            est_pairs = len(window_events) * (len(window_events) - 1) // 2
+            logging.info(
+                'adaptive window %s (%d/%d): level=%s q=[%.4f, %.4f], events=%d, pairs=%d',
+                window['window_id'], run_idx, len(executable_windows), window['level'],
+                window['start_q'], window['end_q'], len(window_events), est_pairs,
+            )
+
+            local_positions = self._run_subset_position_samples(
+                window_events,
+                num_seasons=int(local_num_seasons),
+                samples=samples,
+            )
+            support_by_event = {m['event']: float(m['support']) for m in window_memberships}
+            local_records = pairwise_from_position_samples(
+                local_positions,
+                window_events,
+                source='local_window',
+                window_id=window['window_id'],
+                weight=1.0,
+            )
+            for record in local_records:
+                record['weight'] = (
+                    support_by_event.get(record['event1'], 0.0)
+                    * support_by_event.get(record['event2'], 0.0)
+                    * max(float(record.get('n_position_samples', 0)), 1.0)
+                )
+                record['level'] = window['level']
+                record['start_q'] = window['start_q']
+                record['end_q'] = window['end_q']
+            local_pairwise.extend(local_records)
+            window['executed'] = True
+            window['skip_reason'] = ''
+            executed_windows.append(window['window_id'])
+            elapsed = time.time() - window_start
+            completed_window_times.append(elapsed)
+            mean_window_time = sum(completed_window_times) / float(len(completed_window_times))
+            remaining = mean_window_time * (len(executable_windows) - run_idx)
+            logging.info(
+                'adaptive window %s completed in %.1fs; local_pairwise_rows=%d; estimated_remaining=%.1fs',
+                window['window_id'], elapsed, len(local_records), remaining,
+            )
+
+        logging.info(
+            'adaptive refinement local windows complete in %.1fs; local_pairwise_rows=%d; global_pairwise_rows=%d',
+            time.time() - start_time, len(local_pairwise), len(global_pairwise),
+        )
+        refined_pairwise = aggregate_pairwise_estimates(global_pairwise, local_pairwise)
+        local_refined = sum(1 for rec in refined_pairwise if rec.get('estimator_source') == 'local_mixture')
+        logging.info(
+            'adaptive refinement aggregated %d refined pairwise estimate(s): local_mixture=%d, global=%d',
+            len(refined_pairwise), local_refined, len(refined_pairwise) - local_refined,
+        )
+        bt_scores = fit_bradley_terry_scores(
+            refined_pairwise,
+            events,
+            l2_penalty=bt_l2_penalty,
+        )
+        logging.info('adaptive refinement completed in %.1fs', time.time() - start_time)
+
+        position_rows = []
+        for summary in position_summary.values():
+            row = dict(summary)
+            row.pop('q_samples', None)
+            position_rows.append(row)
+
+        return {
+            'position_summary': position_rows,
+            'windows': windows,
+            'memberships': memberships,
+            'local_pairwise': local_pairwise,
+            'global_pairwise': global_pairwise,
+            'refined_pairwise': refined_pairwise,
+            'bt_scores': bt_scores,
+            'executed_windows': executed_windows,
+        }
 
     def calc_log_odds_full_run(self):
 

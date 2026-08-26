@@ -625,6 +625,36 @@ def build_parser():
                              action='store',
                              default=0.05,
                              help='minimum percentage of samples having that event for it to be included in the league model')
+    leaguemodel.add_argument('--adaptive_refinement',
+                             action='store_true',
+                             dest='adaptive_refinement',
+                             default=False,
+                             help='Run optional posterior-support adaptive local refinement and write diagnostic TSVs')
+    leaguemodel.add_argument('--adaptive_local_n_seasons',
+                             type=int,
+                             action='store',
+                             default=256,
+                             help='number of seasons for each adaptive local refinement window')
+    leaguemodel.add_argument('--adaptive_max_depth',
+                             type=int,
+                             action='store',
+                             default=1,
+                             help='maximum recursive depth of fractional adaptive refinement windows')
+    leaguemodel.add_argument('--adaptive_support_threshold',
+                             type=float,
+                             action='store',
+                             default=0.05,
+                             help='minimum posterior rank support required to include an event in an adaptive window')
+    leaguemodel.add_argument('--adaptive_min_window_events',
+                             type=int,
+                             action='store',
+                             default=4,
+                             help='minimum number of events required to run a local adaptive window')
+    leaguemodel.add_argument('--adaptive_bt_l2_penalty',
+                             type=float,
+                             action='store',
+                             default=1e-3,
+                             help='L2 penalty for Bradley-Terry calibration of adaptive pairwise probabilities')
     leaguemodel.set_defaults(func=LeagueModel.LeagueModel.run_league_model)
 
     # print help without -h

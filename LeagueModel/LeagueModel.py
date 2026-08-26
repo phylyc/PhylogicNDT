@@ -121,6 +121,21 @@ def _run_permutations_parallel(league_model_run, args):
             pass
 
 
+def _write_adaptive_refinement_outputs(cohort, refinement):
+    import pandas as pd
+
+    outputs = (
+        ('adaptive_position_posterior', refinement.get('position_summary', [])),
+        ('adaptive_windows', refinement.get('windows', [])),
+        ('adaptive_window_membership', refinement.get('memberships', [])),
+        ('adaptive_local_pairwise', refinement.get('local_pairwise', [])),
+        ('adaptive_pairwise', refinement.get('refined_pairwise', [])),
+        ('adaptive_scores', refinement.get('bt_scores', [])),
+    )
+    for suffix, rows in outputs:
+        pd.DataFrame(rows).to_csv(cohort + '.' + suffix + '.tsv', sep='\t', index=False)
+
+
 def run_league_model(args):
     print(args)
     import pandas as pd
@@ -237,6 +252,17 @@ def run_league_model(args):
     )
 
     league_model_run.calc_log_odds_full_run()
+
+    if getattr(args, 'adaptive_refinement', False):
+        refinement = league_model_run.run_adaptive_refinement(
+            samples=all_samps,
+            local_num_seasons=int(args.adaptive_local_n_seasons),
+            max_depth=int(args.adaptive_max_depth),
+            support_threshold=float(args.adaptive_support_threshold),
+            min_window_events=int(args.adaptive_min_window_events),
+            bt_l2_penalty=float(args.adaptive_bt_l2_penalty),
+        )
+        _write_adaptive_refinement_outputs(args.cohort, refinement)
 
     ## plotting ##
     league_model_run.plot_league_run(type='odds')
