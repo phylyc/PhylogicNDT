@@ -561,26 +561,40 @@ class Patient:
         if path:
             with open(path) as handle:
                 for line in handle:
-                    if line.startswith('#') or not line.strip():
-                        continue
                     fields = line.split()
+                    if line.startswith('#') or len(fields) < 3 or not (fields[1].isdigit() and fields[2].isdigit()):
+                        continue
                     artifacts[fields[0].replace('chr', '')].append((int(fields[1]), int(fields[2])))
         return artifacts
+
+    @staticmethod
+    def _in_artifact(start, end, artifacts):
+        """A segment is an artifact if the regions jointly cover half of it, or if it holds a region given as one position."""
+        covered, reach = 0, start
+        for s, e in sorted(artifacts):
+            if s == e and start <= s < end:
+                return True
+            s, e = max(s, reach), min(e, end)
+            if e > s:
+                covered += e - s
+                reach = e
+        return covered >= .5 * (end - start)
 
     @staticmethod
     def _copies_per_copy_ratio(sample):
         """Copy-number units per copy-ratio unit, read off the sample's autosomal segments, which lie on one line."""
         if not hasattr(sample, '_copies_per_copy_ratio'):
-            points = [(iv.data[1]['copy_ratio'], iv.data[1]['total_cn_cont'])
+            points = [(iv.data[1].get('copy_ratio'), iv.data[1].get('total_cn_cont'))
                       for chrom, tree in sample.CnProfile.items() if chrom not in ('X', 'Y') for iv in tree]
-            points = np.array([p for p in points if np.isfinite(p[0]) and np.isfinite(p[1])])
+            points = np.array([p for p in points if p[0] is not None and p[1] is not None])
             sample._copies_per_copy_ratio = np.polyfit(points[:, 0], points[:, 1], 1)[0] if len(points) >= 2 else np.nan
         return sample._copies_per_copy_ratio
 
     def _segment_homdel_call(self, sample, chrom, start, end, artifacts, max_length, min_posterior, min_probes=5,
-                             min_overlap=1000, flank_bp=1000000, min_sd=0.1):
+                             min_overlap=1000, flank_bp=1000000, min_sd=0.1, max_copies=0.3):
         """
-        Homozygous deletion in [start, end): one segment whose copy number is 0 rather than 1, given its noise.
+        Homozygous deletion in [start, end): one segment whose copy number is near 0 and closer to 0 than to 1, given
+        its noise. Comparing 0 with 1 alone is not enough, since a value between them fits neither.
 
         The modal state of a whole window cannot do this: windows are megabases long, and modal 0/0 can come from
         rounding at low purity. CCF is the depth of the drop relative to the copy number flanking the segment.
@@ -595,22 +609,22 @@ class Patient:
             seg = iv.data[1]
             if min(iv.end, end) - max(iv.begin, start) < min_overlap or iv.length() > max_length:
                 continue
-            copies = seg.get('total_cn_cont', np.nan)
-            if not np.isfinite(copies) or not seg.get('n_probes', 0) >= min_probes:
+            copies = seg.get('total_cn_cont')
+            if copies is None or (seg.get('n_probes') or 0) < min_probes or copies > max_copies:
                 continue
-            if any(min(iv.end, e) - max(iv.begin, s) >= .5 * iv.length() for s, e in artifacts.get(chrom, ())):
+            if self._in_artifact(iv.begin, iv.end, artifacts.get(chrom, ())):
                 continue
-            sd = max(seg.get('seg_sigma', np.nan) * slope, min_sd)
-            if not np.isfinite(sd):
-                sd = min_sd
+            sd = (seg.get('seg_sigma') or 0.) * slope
+            sd = max(sd, min_sd) if np.isfinite(sd) else min_sd
             copies = max(copies, 0.)
             log_odds = ((copies - 1.) ** 2 - copies ** 2) / (2. * sd ** 2)  # copy number 0 against copy number 1
             posterior = 1. / (1. + np.exp(-np.clip(log_odds, -700, 700)))
             if posterior < min_posterior or (best is not None and posterior <= best[0]):
                 continue
-            flanks = [(other.data[1].get('total_cn_cont', np.nan), other.length())
+            flanks = [(other.data[1].get('total_cn_cont'),
+                       min(other.end, iv.end + flank_bp) - max(other.begin, iv.begin - flank_bp))
                       for other in tree.overlap(iv.begin - flank_bp, iv.end + flank_bp) if other != iv]
-            flanks = [(value, length) for value, length in flanks if np.isfinite(value) and value >= .5]
+            flanks = [(value, length) for value, length in flanks if value is not None and value >= .5]
             flank_cn = 1.
             if flanks:
                 order = sorted(flanks)
@@ -714,7 +728,7 @@ class Patient:
             if not cn_prof or chrom not in cn_prof:
                 return 1, 0.0, 0.0, 0.0
             if allele_key == 'a1' and chrom in self.hemizygous_chroms:
-                return 1, 0.0, 0.0, 0.0  # no second allele to lose
+                return 0, 0.0, 0.0, 0.0  # no second allele to lose: its absence is the normal state
 
             overlaps = list(cn_prof[chrom].overlap(min(0, s - padding), e + padding))
             if not overlaps:
@@ -818,6 +832,7 @@ class Patient:
                     # Any sample with CN=0 on BOTH alleles → homdel carrier
                     homdel_carriers = {i for i in range(n_samp) if cn_a1[i] == 0 and cn_a2[i] == 0}
                     is_homdel = len(homdel_carriers) > 0
+                    hemizygous = chrom in self.hemizygous_chroms
 
                     if segment_homdels is not None:
                         is_homdel = False
@@ -857,6 +872,8 @@ class Patient:
                     # emit an event for each allele with any non-neutral evidence
                     for allele_key, (cn_vec, hat, hi, lo) in results.items():
                         if all(cn == 1 for cn in cn_vec):
+                            continue
+                        if hemizygous and allele_key == 'a1':
                             continue
 
                         if R['type'] in ('AMP', 'AMPLIFICATION'):

@@ -492,7 +492,9 @@ def build_parser():
                                action='store',
                                dest='cn_clonal_min_ccf',
                                default=0.8,
-                               help='With --continuous_cn or --sex_aware: copy-number events below this CCF are subclonal.')
+                               help='With --continuous_cn, and for chrY with --sex_aware: copy-number events below this CCF '
+                                    'are subclonal, and events too close to it to tell stay unknown. '
+                                    'With --clonal_unresolved it applies to focal events too.')
 
     timing = subparsers.add_parser("Timing", help="Time somatic events in one or multiple samples.",
                                    parents=[base_parser, timing_parent])

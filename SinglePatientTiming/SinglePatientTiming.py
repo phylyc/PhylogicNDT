@@ -9,6 +9,8 @@ from SinglePatientTiming import TimingEngine
 from output.PhylogicOutput import PhylogicOutput
 
 TimedEvent = namedtuple('TimedEvent', ['event_name', 'pi_dist', 'timing_status'], defaults=(None,))
+# Which row to keep when alleles share an event name. Only tables written with the new options have statuses.
+STATUS_RANK = {'subclonal': 1, 'ambiguous_clonality': 2, 'clonal_unresolved': 3, 'prior_only': 4, 'estimated': 5}
 
 
 def run_tool(args):
@@ -22,8 +24,8 @@ def run_tool(args):
     if args.sif:  # if sif file is specified
         sif = pd.read_csv(args.sif, sep="\t")
         if args.sex_aware:
-            if 'sex' not in sif.columns or sif['sex'].nunique() != 1:
-                raise ValueError('--sex_aware needs a sex column in the SIF with one value per patient.')
+            if 'sex' not in sif.columns or sif['sex'].isna().any() or sif['sex'].astype(str).str.strip().str.upper().nunique() != 1:
+                raise ValueError('--sex_aware needs a sex column in the SIF with one value per patient, on every row.')
             sex = sif['sex'].iloc[0]
         for _, row in sif.iterrows():
             patient_data.addSample(
@@ -57,6 +59,12 @@ def run_tool(args):
                                    timepoint_value=timepoint, grid_size=args.grid_size,
                                    _additional_muts=None, seg_file=seg_fn, purity=purity)
 
+    if args.sex_aware and args.genome_build != 'hg19':
+        raise ValueError('--sex_aware defines callable chrY for hg19 only.')
+    if args.segment_homdels and not (args.gistic_fn and args.clonal_unresolved):
+        raise ValueError('--segment_homdels needs --cn_peaks, and --clonal_unresolved to time what it calls.')
+    if args.homdel_artifact_file and not args.segment_homdels:
+        raise ValueError('--homdel_artifact_file has no effect without --segment_homdels.')
     options = TimingEngine.TimingOptions(sex=sex, sex_aware=args.sex_aware, continuous_cn=args.continuous_cn,
                                          clonal_unresolved=args.clonal_unresolved, segment_homdels=args.segment_homdels,
                                          cn_clonal_min_ccf=args.cn_clonal_min_ccf)
@@ -137,7 +145,10 @@ def read_timed_events(timing_tsv, event_file=None, compare_all=False):
         if event_name in timing_by_event:
             duplicate_event_counts[event_name] = duplicate_event_counts.get(event_name, 1) + 1
             prev_pi_dist, prev_event_class, prev_status = timing_by_event[event_name]
-            if prev_pi_dist is None and pi_dist is not None:
+            if STATUS_RANK.get(status, 0) > STATUS_RANK.get(prev_status, 0):
+                # Two alleles can share a name. The event happened no later than its earliest step.
+                timing_by_event[event_name] = (pi_dist, event_class or prev_event_class, status)
+            elif prev_pi_dist is None and pi_dist is not None and prev_status is None:
                 timing_by_event[event_name] = (pi_dist, event_class or prev_event_class, status)
             continue
 

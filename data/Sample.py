@@ -21,12 +21,17 @@ na_values = {'-1.#IND', '1.#QNAN', '1.#IND', '-1.#QNAN', '#N/A', 'N/A', 'NA', '#
              '-nan', ''}  # http://pandas.pydata.org/pandas-docs/stable/io.html#na-values
 
 
-def _float_or_nan(row, key):
-    """Optional numeric segment column: a missing or empty value must not drop the segment."""
+def _float_or_none(row, key):
+    """Optional numeric segment column: a missing or empty value must not drop the segment.
+
+    None rather than NaN, because NaN breaks equality of the Interval that holds it, which would keep duplicate
+    segments that interval trees otherwise collapse. NaN in the file also reads as None.
+    """
     try:
-        return float(row[key])
+        value = float(row[key])
     except (KeyError, TypeError, ValueError):
-        return float('nan')
+        return None
+    return None if value != value else value
 
 
 class TumorSample:
@@ -478,12 +483,14 @@ class TumorSample:
                         local_cn_a2 = int(float(row['modal.a2']))
                         seg_tree[chrN].add(Interval(start, end,
                                                     (self.sample_name, {'cn_a1': local_cn_a1, 'cn_a2': local_cn_a2,
-                                                                        'cn_a1_cont': _float_or_nan(row, 'rescaled.cn.a1'),
-                                                                        'cn_a2_cont': _float_or_nan(row, 'rescaled.cn.a2'),
-                                                                        'total_cn_cont': _float_or_nan(row, 'rescaled_total_cn'),
-                                                                        'copy_ratio': _float_or_nan(row, 'total_copy_ratio'),
-                                                                        'seg_sigma': _float_or_nan(row, 'seg_sigma'),
-                                                                        'n_probes': _float_or_nan(row, 'n_probes'),
+                                                                        'hscr_a1': _float_or_none(row, 'hscr.a1'),
+                                                                        'hscr_a2': _float_or_none(row, 'hscr.a2'),
+                                                                        'rescaled_a1': _float_or_none(row, 'rescaled.cn.a1'),
+                                                                        'rescaled_a2': _float_or_none(row, 'rescaled.cn.a2'),
+                                                                        'total_cn_cont': _float_or_none(row, 'rescaled_total_cn'),
+                                                                        'copy_ratio': _float_or_none(row, 'total_copy_ratio'),
+                                                                        'seg_sigma': _float_or_none(row, 'seg_sigma'),
+                                                                        'n_probes': _float_or_none(row, 'n_probes'),
                                                                         'ccf_hat_a1': ccf_hat_a1,
                                                                         'ccf_high_a1': ccf_high_a1,
                                                                         'ccf_low_a1': ccf_low_a1,

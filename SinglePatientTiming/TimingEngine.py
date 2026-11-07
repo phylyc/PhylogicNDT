@@ -11,7 +11,9 @@ import data.Enums as Enums
 # Mappable chrY blocks in hg19. Neither Y arm reaches the 50% coverage required of an arm, so chrY is called as one
 # event over this territory. Short blocks outside it keep signal even in tumors that lost Y, likely from cross-mapping.
 Y_CALLABLE_BLOCKS_HG19 = ((6420000, 10070000), (13560000, 19560000), (20800000, 23810000))
-MALE_LABELS = ('XY', 'MALE', 'M')
+SEX_LABELS = {'XY': 'male', 'MALE': 'male', 'M': 'male', 'XX': 'female', 'FEMALE': 'female', 'F': 'female'}
+# Smallest uncertainty assumed for an event's CCF, because purity error moves copy number beyond segment noise.
+MIN_CCF_SD = .05
 
 
 class TimingOptions(object):
@@ -24,15 +26,17 @@ class TimingOptions(object):
     clonal_unresolved: clonal events without timing evidence precede subclonal events and stay unknown against clonal ones.
     segment_homdels: focal homozygous deletions come from Patient.add_focal_cn_events(segment_homdels=...), are present
         in WGD tumors, and are timed by the WGD rule or as clonal_unresolved instead of with a uniform distribution.
-    cn_event_tol: smallest deviation from the normal copy number that counts as an event when continuous_cn is on.
+    cn_event_tol: smallest deviation from the normal copy number that counts as an event when continuous_cn is on,
+        and the largest copy number still read as no copy left.
     cn_clonal_min_ccf: copy-number events below this CCF in any sample are subclonal, also when the tumor has no
-        subclonal mutation cluster to assign them to.
+        subclonal mutation cluster to assign them to. Events whose CCF cannot be told from it stay unknown.
     """
     def __init__(self, sex=None, sex_aware=False, continuous_cn=False, clonal_unresolved=False, segment_homdels=False,
                  y_callable_blocks=Y_CALLABLE_BLOCKS_HG19, cn_event_tol=.2, cn_clonal_min_ccf=.8):
-        if sex_aware and sex is None:
-            raise ValueError('sex_aware timing requires the sex of the patient.')
-        self.sex = sex
+        label = SEX_LABELS.get(str(sex).strip().upper())
+        if sex_aware and label is None:
+            raise ValueError('sex_aware timing requires the sex of the patient, as XY or XX. Got: {!r}'.format(sex))
+        self.sex = label
         self.sex_aware = sex_aware
         self.continuous_cn = continuous_cn
         self.clonal_unresolved = clonal_unresolved
@@ -43,7 +47,7 @@ class TimingOptions(object):
 
     @property
     def male(self):
-        return self.sex_aware and str(self.sex).upper() in MALE_LABELS
+        return self.sex_aware and self.sex == 'male'
 
     def is_hemizygous(self, chrN):
         return self.male and str(chrN).replace('chr', '') in ('X', 'Y')
@@ -51,6 +55,10 @@ class TimingOptions(object):
     @property
     def extended_output(self):
         return self.sex_aware or self.continuous_cn or self.clonal_unresolved or self.segment_homdels
+
+
+def _number(value):
+    return np.nan if value is None else float(value)
 
 
 def _weighted_median(values, weights):
@@ -104,7 +112,9 @@ class TimingEngine(object):
             region = chrN + arm
             states_across_samples = {}  # hold union of all copy number states in all samples
             for sample in self.sample_list:
-                if region in sample.cn_states and len(sample.cn_states[region].cn_events):
+                # After WGD a 2/2 arm has no events, but it is the main evidence for timing the WGD itself.
+                keep_for_wgd = self.options.extended_output and region in sample.cn_states and sample.cn_states[region].cn_a2 >= 2
+                if region in sample.cn_states and (len(sample.cn_states[region].cn_events) or keep_for_wgd):
                     # Coerce copy number states to integer states
                     if 0. <= sample.cn_states[region].cn_a1 < 1.:
                         cn_a1 = 0.
@@ -146,14 +156,21 @@ class TimingEngine(object):
                                            cluster_assignment=mut.cluster_assignment)
                         supporting_muts.append(nd_mut)
                         self.timeable_muts[mut_varstr] = nd_mut
-                    # Across samples, keep the value farthest from the shared integer state so the event is not averaged away.
-                    continuous = [s.continuous for s in states_across_samples[state] if s.continuous is not None]
-                    if continuous:
-                        continuous = tuple(max((c[i] for c in continuous), key=lambda v: abs(v - state[i])) for i in (0, 1))
-                    else:
-                        continuous = None
+                    # The patient-level event must exist in every sample: an event private to one sample is dropped,
+                    # as for integer states, so keep the value closest to the shared state. CCF stays per sample.
+                    continuous, continuous_sd = None, None
+                    sample_states = [s for s in states_across_samples[state] if s.continuous is not None]
+                    if sample_states:
+                        def closest(i):
+                            finite = [s for s in sample_states if np.isfinite(s.continuous[i])]
+                            return min(finite, key=lambda s: abs(s.continuous[i] - state[i])) if finite else None
+                        chosen = [closest(0), closest(1)]
+                        continuous = tuple(np.nan if c is None else c.continuous[i] for i, c in enumerate(chosen))
+                        continuous_sd = tuple(0. if c is None or c.continuous_sd is None else c.continuous_sd[i]
+                                              for i, c in enumerate(chosen))
                     multisample_state = TimingCNState(self.sample_list, chrN, arm, state, purity,
                                                       supporting_muts=supporting_muts, continuous=continuous,
+                                                      continuous_sd=continuous_sd,
                                                       cn_type_prefix=states_across_samples[state][0].cn_type_prefix)
                     self.concordant_cn_states[chrN + arm] = multisample_state
 
@@ -221,14 +238,17 @@ class TimingEngine(object):
             for eve in state.cn_events:
                 etype = eve.Type  # 'Arm_gain' or 'Arm_loss'
                 ccf_hats = []
+                ccf_sds = []
                 for sample in self.sample_list:
                     s_state = sample.cn_states.get(cn_state)
                     if s_state is None:
                         ccf_hats.append(0.0)
+                        ccf_sds.append(0.0)
                         continue
-                    # find the matching event by Type; default to 0 if missing
-                    match = next((e for e in s_state.cn_events if e.Type == etype), None)
+                    # find the matching event by Type and allele; default to 0 if missing
+                    match = next((e for e in s_state.cn_events if e.Type == etype and e.allele == eve.allele), None)
                     ccf_hats.append(float(getattr(match, 'ccf_hat', 0.0) or 0.0))
+                    ccf_sds.append(float(getattr(match, 'ccf_sd', 0.0) or 0.0))
                 ccf_idx = np.clip(np.round(np.array(ccf_hats) * 100).astype(int), 0, 100)
                 clonal_concordance = np.prod(cluster_ccfs[1][sample_idx, ccf_idx])
                 is_clonal = True
@@ -236,8 +256,15 @@ class TimingEngine(object):
                     if np.prod(cluster_ccfs[c][sample_idx, ccf_idx]) > clonal_concordance:
                         is_clonal = False
                         break
-                if (self.options.continuous_cn or etype.startswith('Chrom_')) and min(ccf_hats) < self.options.cn_clonal_min_ccf:
-                    is_clonal = False
+                if self.options.continuous_cn or etype.startswith('Chrom_'):
+                    lowest = int(np.argmin(ccf_hats))
+                    margin = 1.96 * max(ccf_sds[lowest], MIN_CCF_SD)
+                    if ccf_hats[lowest] + margin < self.options.cn_clonal_min_ccf:
+                        is_clonal = False
+                    elif ccf_hats[lowest] - margin < self.options.cn_clonal_min_ccf:
+                        is_clonal = False
+                        eve.clonality_ambiguous = True
+                    eve.ccf_hat = ccf_hats[lowest]
                 eve.is_clonal = is_clonal
                 self.all_cn_events.setdefault(eve.event_name, []).append(eve)
                 if is_clonal:
@@ -421,6 +448,9 @@ class TimingEngine(object):
                     rec['pairs'][si] = (0., 0.)
                 else:
                     rec['pairs'][si] = _best_segment_pair(ts, cn.chrN, start_bp, end_bp, cn.cn_category)
+                    if self.options.segment_homdels and rec['pairs'][si] == (0., 0.):
+                        # Rounded to 0/0, but the segment call rejected a homdel: one allele is gone, some copy remains.
+                        rec['pairs'][si] = (0., 1.)
 
         if not groups:
             return
@@ -574,6 +604,11 @@ class TimingEngine(object):
                     is_clonal = False
                     break
 
+            if self.options.clonal_unresolved:
+                # The event must reach the clonal CCF in every sample, also a sample without it.
+                is_clonal = is_clonal and float(np.min(rec['ccf'])) >= self.options.cn_clonal_min_ccf
+                eve.ccf_hat = float(np.max(rec['ccf']))
+
             eve.is_clonal = is_clonal
 
             # IMPORTANT:
@@ -673,6 +708,9 @@ class TimingEngine(object):
             return ev.Type.startswith(('Arm_', 'Chrom_'))
 
         def _has_support(ev):
+            if self.options.clonal_unresolved:
+                # Only clonal mutations carry multiplicity evidence. Otherwise the result is the prior alone.
+                return sum(1 for mut in ev.supporting_muts if mut.is_clonal) >= self.min_supporting_muts
             return len(ev.supporting_muts) >= self.min_supporting_muts
 
         def _state_ok(ev):
@@ -712,10 +750,12 @@ class TimingEngine(object):
         # ------------------------------------------------------------------
         if self.WGD is not None:
             self.WGD.get_pi_dist()
-            if hasattr(self.WGD, 'timing_status'):
+            if self.options.clonal_unresolved and self.WGD.n_timed_gains == 0:
+                # A WGD with no timed gain has a uniform distribution, which is no evidence to time others against.
+                self.WGD.pi_dist = None
+                self.WGD.timing_status = 'clonal_unresolved'
+            else:
                 self.WGD.timing_status = 'estimated'
-                self.WGD.timing_source = 'wgd'
-                self.WGD.timing_reason = None
 
             for mut in self.mutations.values():
                 if mut.is_clonal:
@@ -723,9 +763,14 @@ class TimingEngine(object):
 
             for evs in self.all_cn_events.values():
                 for cn_event in evs:
-                    if not cn_event.is_clonal:
+                    if cn_event.clonality_ambiguous:
+                        cn_event.pi_dist = None
+                        _set_status(cn_event, status='ambiguous_clonality', source='clonality_rule', reason='ccf_near_cutoff')
+                    elif not cn_event.is_clonal:
                         cn_event.pi_dist = subclonal_dist.copy()
                         _set_status(cn_event, status='subclonal', source='clonality_rule', reason='event_not_truncal')
+                    elif self.WGD.pi_dist is None:
+                        _set_not_estimable(cn_event, reason='wgd_not_timed')
                     elif cn_event.Type.endswith('homdel') and self.options.segment_homdels:
                         # No copy left: by parsimony both alleles were lost before the genome doubled.
                         cn_event.get_pi_dist_for_loss(self.WGD)
@@ -773,6 +818,11 @@ class TimingEngine(object):
             arm_prior_lookup = {}
 
             for ev in arm_events:
+                if ev.clonality_ambiguous:
+                    ev.pi_dist = None
+                    _set_status(ev, status='ambiguous_clonality', source='clonality_rule', reason='ccf_near_cutoff')
+                    continue
+
                 if not ev.is_clonal:
                     ev.pi_dist = subclonal_dist.copy()
                     _set_status(ev, status='subclonal', source='clonality_rule', reason='event_not_truncal')
@@ -886,6 +936,7 @@ class TimingSample(object):
         self.cn_state_whitelist = cn_state_whitelist
         self.purity = self.sample.purity
         self.CnProfile = self.sample.CnProfile
+        self.copy_ratio_line = self._fit_copy_ratio_line() if (self.options.continuous_cn or self.options.male) else None
         self._chromosomes = self.engine.genome.CHROMS
         self.arm_regions = self.engine.arm_regions
         self.mutation_intervaltree = {chrom: IntervalTree() for chrom in self._chromosomes}
@@ -907,6 +958,80 @@ class TimingSample(object):
 
     def __repr__(self):
         return '<TimingSample object: {}>'.format(self.sample_name)
+
+    def _fit_copy_ratio_line(self):
+        """(slope, intercept) with total copy number = slope * copy ratio + intercept, from the autosomal segments.
+
+        All of them lie on this line, which holds purity and ploidy. The slope is 1 / delta and the intercept -b / delta.
+        """
+        points = []
+        for chrom, tree in self.CnProfile.items():
+            if str(chrom).replace('chr', '') in ('X', 'Y'):
+                continue
+            for seg in tree:
+                ratio, total = _number(seg.data[1].get('copy_ratio')), _number(seg.data[1].get('total_cn_cont'))
+                if np.isfinite(ratio) and np.isfinite(total):
+                    points.append((ratio, total))
+        if len(points) < 2 or np.ptp([p[0] for p in points]) == 0:
+            return np.nan, np.nan
+        points = np.array(points)
+        slope, intercept = np.polyfit(points[:, 0], points[:, 1], 1)
+        return float(slope), float(intercept)
+
+    def _allele_copy_number(self, data):
+        """Continuous copy number and its noise, as (a1, a2, sd1, sd2).
+
+        Allelic copy number comes from the homolog-specific copy ratio: q = (hscr - b) / (2 * delta). The rescaled.cn
+        columns sit on the modal integer unless ABSOLUTE flags a segment, so they cannot show subclonal states, and are
+        used only where hscr is absent, as on male X and Y whose rows are rescued as (0, copy number).
+        """
+        slope, intercept = self.copy_ratio_line
+        sigma = _number(data.get('seg_sigma'))
+        values, sds = [], []
+        for allele in ('a1', 'a2'):
+            hscr = _number(data.get('hscr_' + allele))
+            if np.isfinite(hscr) and np.isfinite(slope):
+                values.append((hscr * slope + intercept) / 2.)
+                sds.append(sigma * slope / np.sqrt(2.))
+            else:
+                values.append(_number(data.get('rescaled_' + allele)))
+                sds.append(sigma * slope / 2.)
+        return values[0], values[1], sds[0], sds[1]
+
+    def _continuous_arm_state(self, segments, size_threshold):
+        """Arm state from continuous copy number, or None if no single state holds enough of the arm.
+
+        Grouping on continuous values keeps a state whose segments round to different integers, as happens near CCF 0.5.
+        Returns the modal state with the most length in the group, the continuous values and their uncertainty.
+        """
+        tol = self.options.cn_event_tol
+        lengths = np.array([length for _, length in segments], dtype=float)
+        rows = [self._allele_copy_number(seg.data[1]) for seg, _ in segments]
+        a1, a2, sd1, sd2 = (np.array([row[i] for row in rows], dtype=float) for i in range(4))
+        modal = [(seg.data[1]['cn_a1'], seg.data[1]['cn_a2']) for seg, _ in segments]
+        # Where a value is missing, fall back to the modal state of that segment.
+        a1 = np.where(np.isfinite(a1), a1, [m[0] for m in modal])
+        a2 = np.where(np.isfinite(a2), a2, [m[1] for m in modal])
+
+        def group(mask):
+            center = (_weighted_median(a1[mask], lengths[mask]), _weighted_median(a2[mask], lengths[mask]))
+            return center, mask & (np.abs(a1 - center[0]) <= tol) & (np.abs(a2 - center[1]) <= tol)
+
+        total = lengths.sum()
+        everything = np.ones(len(lengths), dtype=bool)
+        center, inside = group(everything)
+        if lengths[inside].sum() <= size_threshold * total:
+            return None
+        if (~inside).any():
+            _, second = group(~inside)
+            if lengths[second].sum() > size_threshold * total:
+                return None
+        by_state = Counter()
+        for index in np.flatnonzero(inside):
+            by_state[modal[index]] += lengths[index]
+        weights = lengths[inside] / lengths[inside].sum()
+        sds = tuple(float(np.sqrt(np.nansum((weights * sd[inside]) ** 2))) for sd in (sd1, sd2))
+        return by_state.most_common(1)[0][0], center, sds
 
     def __getitem__(self, key):
         return self.mut_lookup_table[key]
@@ -960,10 +1085,13 @@ class TimingSample(object):
                 arm_segtree = full_segtree[chrN][centromere:]
                 start = centromere
                 end = self.engine.genome.CHROM_DICT[chrN]
+            if self.options.male and chrN == 'Y':
+                self.missing_arms.append((chrN, arm))  # chrY is called as one event over callable territory
+                continue
             true_arm_bp = end - start
             arm_bp = 0
             state_bps = {}
-            state_segments = {}
+            arm_segments = []
             for seg in arm_segtree:
                 if seg.begin < start:
                     seg_len = seg.end - start
@@ -981,24 +1109,31 @@ class TimingSample(object):
                 state_tuple = (cn_a1, cn_a2)
                 state_bps.setdefault(state_tuple, 0)
                 state_bps[state_tuple] += seg_len
-                state_segments.setdefault(state_tuple, []).append((seg, seg_len))
+                arm_segments.append((seg, seg_len))
             states_over_threshold = [cn for cn, bp in state_bps.items() if bp > arm_bp * size_threshold]
+            continuous, continuous_sd = None, None
+            if arm_bp >= true_arm_bp * .5 and self.options.continuous_cn:
+                call = self._continuous_arm_state(arm_segments, size_threshold)
+                states_over_threshold = [] if call is None else [call[0]]
+                if call is not None:
+                    continuous, continuous_sd = call[1], call[2]
             if arm_bp < true_arm_bp * .5:  # Only call if at least 50% of arm is in segs
                 self.missing_arms.append((chrN, arm))
             elif len(states_over_threshold) == 1:
                 cn_a1, cn_a2 = next(iter(states_over_threshold))
-                continuous = self._continuous_state(state_segments[(cn_a1, cn_a2)]) if self.options.continuous_cn else None
                 if concordant_states is None:
                     supporting_muts = [interval.data for interval in self.mutation_intervaltree[chrN][start:end]
                                        if interval.data.local_cn_a1 == cn_a1 and interval.data.local_cn_a2 == cn_a2]
                     cn_state = TimingCNState([self], chrN, arm, (cn_a1, cn_a2), [self.purity],
-                                             supporting_muts=supporting_muts, continuous=continuous)
+                                             supporting_muts=supporting_muts, continuous=continuous,
+                                             continuous_sd=continuous_sd)
                     self.cn_states[chrN + arm] = cn_state
                 elif chrN + arm in concordant_states:
                     supporting_muts = [interval.data for interval in self.concordant_mutation_intervaltree[chrN][start:end]
                                       if interval.data.local_cn_a1 == cn_a1 and interval.data.local_cn_a2 == cn_a2]
                     cn_state = TimingCNState([self], chrN, arm, (cn_a1, cn_a2), [self.purity],
-                                             supporting_muts=supporting_muts, continuous=continuous)
+                                             supporting_muts=supporting_muts, continuous=continuous,
+                                             continuous_sd=continuous_sd)
                     self.concordant_cn_states[chrN + arm] = cn_state
         if self.options.male:
             y_state = self._call_y_state()
@@ -1008,31 +1143,27 @@ class TimingSample(object):
                 elif 'Y' in concordant_states:
                     self.concordant_cn_states['Y'] = y_state
 
-    @staticmethod
-    def _continuous_state(segments):
-        """Length-weighted median of the continuous allelic copy numbers. NaN where the input has none."""
-        lengths = [length for _, length in segments]
-        values = [[seg.data[1].get(key, np.nan) for seg, _ in segments] for key in ('cn_a1_cont', 'cn_a2_cont')]
-        continuous = (_weighted_median(values[0], lengths), _weighted_median(values[1], lengths))
-        return None if np.isnan(continuous).all() else continuous
-
     def _call_y_state(self, min_callable_fraction=.5):
         """Whole-chromosome chrY state over callable territory. None if too little of that territory is segmented."""
         blocks = self.options.y_callable_blocks
         tree = self.CnProfile['Y']
-        total, values, lengths = sum(end - start for start, end in blocks), [], []
+        total, values, lengths, sds = sum(end - start for start, end in blocks), [], [], []
+        slope = self.copy_ratio_line[0]
         for start, end in blocks:
             for seg in tree.overlap(start, end):
-                length = min(seg.end, end) - max(seg.begin, start)
+                lengths.append(min(seg.end, end) - max(seg.begin, start))
                 # Total copy number, because a male Y has one allele and the allelic columns are rescued, not modeled.
-                value = seg.data[1].get('total_cn_cont', np.nan)
+                value = _number(seg.data[1].get('total_cn_cont'))
                 values.append(value if np.isfinite(value) else float(seg.data[1]['cn_a1']) + float(seg.data[1]['cn_a2']))
-                lengths.append(length)
+                # One Y copy moves the copy ratio twice as much as one copy of a diploid chromosome.
+                sds.append(_number(seg.data[1].get('seg_sigma')) * slope / 2.)
         if sum(lengths) < min_callable_fraction * total:
             return None
         y_cn = _weighted_median(values, lengths)
+        weights = np.array(lengths, dtype=float) / sum(lengths)
+        sd = float(np.sqrt(np.nansum((weights * np.array(sds)) ** 2)))
         return TimingCNState([self], 'Y', '', (0., float(round(y_cn))), [self.purity], supporting_muts=[],
-                             continuous=(0., y_cn), cn_type_prefix='Chrom')
+                             continuous=(0., y_cn), continuous_sd=(0., sd), cn_type_prefix='Chrom')
 
     def call_wgd(self, use_concordant_states=False):
         """
@@ -1100,6 +1231,8 @@ class TimingWGD(object):
         self.pi_dist = pi_dist
         self.min_timeable_muts = min_timeable_muts
         self.supporting_muts = []
+        self.timing_status = None
+        self.n_timed_gains = 0
         self.get_supporting_muts()
 
     def get_pi_dist(self):
@@ -1107,16 +1240,22 @@ class TimingWGD(object):
         Get pi dist by multiplying pi dists for supporting arm gains
         """
         pi_dist = np.zeros(101)
+        self.n_timed_gains = 0
         for state in self.supporting_arm_states:
             for eve in state.cn_events:
                 if eve.Type == 'Arm_gain':
-                    if len(eve.supporting_muts) < self.min_timeable_muts:
+                    if state.options.clonal_unresolved:
+                        n_timeable = sum(1 for mut in eve.supporting_muts if mut.is_clonal)
+                    else:
+                        n_timeable = len(eve.supporting_muts)
+                    if n_timeable < self.min_timeable_muts:
                         continue
                     if eve.pi_dist is None:
                         eve.get_pi_dist_for_gain()
                     if eve.pi_dist is None:
                         continue
                     pi_dist += np.log(eve.pi_dist)
+                    self.n_timed_gains += 1
         self.pi_dist = np.exp(pi_dist - logsumexp(pi_dist))
 
     def get_supporting_muts(self):
@@ -1131,7 +1270,7 @@ class TimingCNState(object):
     """
 
     def __init__(self, sample_list, chrN, arm, cn_state, purity, supporting_muts=None, cn_type_prefix='Arm',
-                 continuous=None):
+                 continuous=None, continuous_sd=None):
         self.sample_list = sample_list
         self.options = getattr(sample_list[0], 'options', None) or TimingOptions()
         self.chrN = chrN
@@ -1141,6 +1280,7 @@ class TimingCNState(object):
         self.supporting_muts = supporting_muts
         self.cn_type_prefix = cn_type_prefix
         self.continuous = continuous  # (a1, a2) continuous copy number, or None to use the integer state
+        self.continuous_sd = continuous_sd
         self.haploid = self.options.is_hemizygous(chrN)
         self.cn_events = None
         self.call_events(cn_type_prefix=cn_type_prefix)
@@ -1160,36 +1300,51 @@ class TimingCNState(object):
         """
         Events relative to the normal state, with presence and CCF taken from continuous copy number where available.
         A hemizygous chromosome has one allele, so a1 = 0 is its normal state and never an event.
+
+        Each event is the step from the normal state to the next copy number, and ccf_hat is the share of tumor cells
+        carrying that step. Its allelic_cn is the copy number the event reached in all cells, which decides its order
+        against a WGD: only a value consistent with no copy left can have been lost before doubling. The event keeps the
+        modal state, because mutations are matched to it and timed from it.
         """
         baseline = 2. if wgd else 1.
         tol = self.options.cn_event_tol
         continuous = self.continuous if self.continuous is not None else (self.cn_a1, self.cn_a2)
         values = [continuous[i] if np.isfinite(continuous[i]) else state for i, state in enumerate((self.cn_a1, self.cn_a2))]
+        sds = self.continuous_sd if self.continuous_sd is not None else (0., 0.)
 
-        def coerce(value):
+        def step(value):
+            """(allelic_cn, ccf_hat) of the event, or None if value is the normal state."""
             if abs(value - baseline) < tol:
-                return baseline
-            if baseline - 1 <= value < baseline:
-                return baseline - 1
-            if baseline < value <= baseline + 1:
-                return baseline + 1
-            return float(round(value))
+                return None
+            if value < baseline:
+                if value < tol:
+                    return 0., min(baseline - value, 1.)
+                # A partial drop below the next integer is that step in all cells, with a further loss in some of them.
+                return baseline - 1., min(baseline - value, 1.)
+            if value <= baseline + 1:
+                return baseline + 1., value - baseline
+            return float(np.floor(value + tol)), 1.
 
-        cn_a1 = 0. if self.haploid else coerce(values[0])
-        cn_a2 = coerce(values[1])
         kwargs = dict(chrN=self.chrN, arm=self.arm, supporting_muts=self.supporting_muts)
-        if cn_a1 == 0 and cn_a2 == 0 and cn_type_prefix == 'Focal':
-            self.cn_events.append(TimingCNEvent(self.sample_list, self, Type=cn_type_prefix + '_homdel', copy_number='0/0',
-                                                allelic_cn=0, ccf_hat=1., **kwargs))
+        copy_number = str(self.cn_a1) + '/' + str(self.cn_a2)
+        lost_a1 = self.haploid or step(values[0]) is not None and step(values[0])[0] == 0
+        lost_a2 = step(values[1]) is not None and step(values[1])[0] == 0
+        if lost_a1 and lost_a2 and cn_type_prefix == 'Focal':
+            event = TimingCNEvent(self.sample_list, self, Type=cn_type_prefix + '_homdel', copy_number='0/0',
+                                  allelic_cn=0, ccf_hat=1., **kwargs)
+            self.cn_events.append(event)
             return
-        alleles = [(cn_a2, values[1])] if self.haploid else [(cn_a1, values[0]), (cn_a2, values[1])]
-        for cn, value in alleles:
-            if cn == baseline:
+        alleles = [('a2', values[1], sds[1])] if self.haploid else [('a1', values[0], sds[0]), ('a2', values[1], sds[1])]
+        for allele, value, sd in alleles:
+            called = step(value)
+            if called is None:
                 continue
             cn_type = cn_type_prefix + ('_gain' if value > baseline else '_loss')
-            self.cn_events.append(TimingCNEvent(self.sample_list, self, Type=cn_type, allelic_cn=cn,
-                                                copy_number=str(cn_a1) + '/' + str(cn_a2),
-                                                ccf_hat=min(abs(value - baseline), 1.), **kwargs))
+            event = TimingCNEvent(self.sample_list, self, Type=cn_type, allelic_cn=called[0], copy_number=copy_number,
+                                  ccf_hat=called[1], **kwargs)
+            event.allele = allele
+            event.ccf_sd = sd
+            self.cn_events.append(event)
 
     def call_events(self, cn_type_prefix=None, wgd=False):
         """
@@ -1269,6 +1424,9 @@ class TimingCNEvent(object):
         self.timing_status = timing_status
         self.timing_source = timing_source
         self.timing_reason = timing_reason
+        self.allele = None
+        self.ccf_sd = None
+        self.clonality_ambiguous = False
 
 
     def __repr__(self):
@@ -1424,6 +1582,7 @@ class TimingCNEvent(object):
                 else:
                     coverage_list.append(int(coverage))
         purity = np.array(self.state.purity)
+        germline = 1 if self.state.haploid else 2
         p2_simulated = []
         for p2 in np.linspace(0, 1, 101):
             n_m1_muts = round((1 - p2) * n_iter)
@@ -1432,10 +1591,10 @@ class TimingCNEvent(object):
                 cov = coverage_list[i]
                 cov = np.asarray(cov, dtype=float)
                 mult = 1 if i < n_m1_muts else 2
-                expected_af = mult * purity / (2 * (1 - purity) + self.total_cn * purity)
+                expected_af = mult * purity / (germline * (1 - purity) + self.total_cn * purity)
                 alt_count = np.random.binomial(cov.astype(int), expected_af).astype(float)
                 af_mode = np.divide(alt_count, cov, out=np.zeros_like(alt_count, dtype=float), where=(cov > 0))
-                ccf_mode = af_mode * (2 * (1 - purity) + purity * self.total_cn) / purity
+                ccf_mode = af_mode * (germline * (1 - purity) + purity * self.total_cn) / purity
                 if all(ccf_mode >= .86) and all(alt_count >= 3):
                     n_detected_by_mult[mult] += 1.
             if n_detected_by_mult[1] == 0. and n_detected_by_mult[2] == 0.:
@@ -1517,6 +1676,12 @@ class TimingMut(object):
             return False
         return self.var_str == other.var_str
 
+    @property
+    def germline_copies(self):
+        """Copies of this locus in a normal cell: 1 on a hemizygous chromosome when the sex is known."""
+        options = getattr(self.sample_list[0], 'options', None)
+        return 1 if options is not None and options.is_hemizygous(self.chrN) else 2
+
     def __hash__(self):
         return hash((self.var_str, (sample.sample_name for sample in self.sample_list)))
 
@@ -1543,7 +1708,7 @@ class TimingMut(object):
         purity = np.array([sample.purity for sample in self.sample_list])  # ND mutation
         for m in range(1, int(max(self.local_cn_a2)) + 1):
             # expected allele fraction from multiplicity, purity, and copy number
-            p = (m * purity) / ((self.local_cn_a1 + self.local_cn_a2) * purity + (2 * (1 - purity)))
+            p = (m * purity) / ((self.local_cn_a1 + self.local_cn_a2) * purity + (self.germline_copies * (1 - purity)))
             mult_lik_dict[m] = scipy.stats.binom.pmf(k, n, p)
         return mult_lik_dict
 
@@ -1604,7 +1769,7 @@ class TimingMut(object):
             total_cn = a1 + a2
             mult_lik = {}
             for m in range(1, max_cn + 1):
-                p_m = (m * p_s) / (total_cn * p_s + 2.0 * (1.0 - p_s))
+                p_m = (m * p_s) / (total_cn * p_s + float(self.germline_copies) * (1.0 - p_s))
                 mult_lik[m] = scipy.stats.binom.pmf(k_s, n_s, p_m)
 
             if a1 == 0 and a2 >= 2 or a1 == a2 != 1:
