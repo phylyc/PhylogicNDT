@@ -559,6 +559,11 @@ class FocalEvents(TimingCase):
         region = ('2', 16000000, 16200000, 'AMP')
         self.assertEqual(self.focal(rows, [region])['Focal_gain_2:16000000-16200000'].ccf_hat, 1.)
 
+    def test_high_amplification_survives_its_large_noise(self):
+        # Segment noise scales with copy ratio. A real amplicon of 100 copies can have sigma near 15.
+        rows = self.with_segments('2', seg_row('2', 15900000, 16300000, 1, 1, q1=1., q2=99., sigma=15.))
+        self.assertIn('Focal_gain_2:16000000-16200000', self.focal(rows, [self.AMP]))
+
     def test_subclonal_focal_gain_has_its_ccf(self):
         rows = self.with_segments('2', seg_row('2', 15900000, 16300000, 1, 1, q1=1., q2=1.6))
         event = self.focal(rows, [self.AMP])['Focal_gain_2:16000000-16200000']

@@ -683,7 +683,8 @@ class Patient:
         sd = (seg.data[1].get('seg_sigma') or 0.) * slope
         sd = max(sd, min_sd) if np.isfinite(sd) else min_sd
         # One allele has half the room to move, so a step counts from half the size.
-        if abs(step) < (min_step / 2. if hemizygous else min_step) or abs(step) / sd < min_z:
+        # Noise grows with copy ratio, so the test cannot apply to high amplification, whose size is not in doubt.
+        if abs(step) < (min_step / 2. if hemizygous else min_step) or (abs(step) / sd < min_z and abs(step) < high_level_step):
             return None
         a1, a2 = sample.allele_copy_number(seg.data[1])
         delta1, delta2 = a1 - flank[1], a2 - flank[2]
