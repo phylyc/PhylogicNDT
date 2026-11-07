@@ -1068,6 +1068,7 @@ class League():
 
         for eve_pair in self.event_pairs.keys():
             eve1,eve2 = eve_pair
+            self.event_pairs[eve_pair].observed_rates = dict(self.event_pairs[eve_pair].win_rates)  # before the low-count rescue
             if sum(self.event_pairs[eve_pair].win_rates.values()) < 2:
                 if self.event_prev[eve1] >= 4 and self.event_prev[eve2] >= 4:
                     self.event_pairs[eve_pair].win_rates['unknown'] += 1
@@ -1077,6 +1078,20 @@ class League():
 
         for eve_pair in self.event_pairs.keys():
             self.event_pairs[eve_pair].calculate_rates()
+
+    def get_event_information(self):
+        """How much real evidence each event's rank rests on. Unknown comparisons score as draws, so an event without
+        evidence sits mid-table with a deceptively narrow interval. Pseudocounts of the low-count rescue are excluded."""
+        rows = {eve: {'n_informative_games': 0., 'n_unknown_games': 0.} for eve in self.final_event_list}
+        for (eve1, eve2), pair in self.event_pairs.items():
+            rates = getattr(pair, 'observed_rates', pair.win_rates)
+            for eve in (eve1, eve2):
+                rows[eve]['n_informative_games'] += rates[eve1] + rates[eve2]
+                rows[eve]['n_unknown_games'] += rates['unknown']
+        for row in rows.values():
+            total = row['n_informative_games'] + row['n_unknown_games']
+            row['draw_fraction'] = row['n_unknown_games'] / total if total > 0 else 1.
+        return rows
 
     def run_league_model_iter(self,num_seasons):
 

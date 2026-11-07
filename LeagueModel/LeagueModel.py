@@ -206,6 +206,12 @@ def run_league_model(args):
     league_model_run.run_full_run(num_seasons=0, samples=all_samps, final_event_list=league_model_run.final_event_list)
     league_model_run.init_odds(league_model_run.final_event_list)
 
+    if getattr(args, 'event_information', False):
+        information = pd.DataFrame.from_dict(league_model_run.get_event_information(), orient='index')
+        information.index.name = 'event'
+        information.insert(0, 'n_occur', [league_model_run.full_event_prev[eve] for eve in information.index])
+        information.to_csv(args.cohort + '.event_information.tsv', sep='\t')
+
     ## output ##
     out_fn = args.cohort + '.matrix_of_comparisons.tsv'
     sorted_final_event_list = sorted(league_model_run.final_event_list)

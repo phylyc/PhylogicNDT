@@ -8,12 +8,68 @@ from scipy.special import logsumexp
 import random
 import data.Enums as Enums
 
+# Mappable chrY blocks in hg19. Neither Y arm reaches the 50% coverage required of an arm, so chrY is called as one
+# event over this territory. Short blocks outside it keep signal even in tumors that lost Y, likely from cross-mapping.
+Y_CALLABLE_BLOCKS_HG19 = ((6420000, 10070000), (13560000, 19560000), (20800000, 23810000))
+MALE_LABELS = ('XY', 'MALE', 'M')
+
+
+class TimingOptions(object):
+    """
+    Opt-in timing behavior. The defaults reproduce the results of the code without these options.
+
+    sex_aware: male X and Y are hemizygous (normal copy number 0/1, or 0/2 after WGD), and chrY gets a whole-chromosome
+        event from callable territory. Requires sex.
+    continuous_cn: arm events and their CCF come from continuous copy number, so subclonal arm events exist as such.
+    clonal_unresolved: clonal events without timing evidence precede subclonal events and stay unknown against clonal ones.
+    segment_homdels: focal homozygous deletions come from Patient.add_focal_cn_events(segment_homdels=...), are present
+        in WGD tumors, and are timed by the WGD rule or as clonal_unresolved instead of with a uniform distribution.
+    cn_event_tol: smallest deviation from the normal copy number that counts as an event when continuous_cn is on.
+    cn_clonal_min_ccf: copy-number events below this CCF in any sample are subclonal, also when the tumor has no
+        subclonal mutation cluster to assign them to.
+    """
+    def __init__(self, sex=None, sex_aware=False, continuous_cn=False, clonal_unresolved=False, segment_homdels=False,
+                 y_callable_blocks=Y_CALLABLE_BLOCKS_HG19, cn_event_tol=.2, cn_clonal_min_ccf=.8):
+        if sex_aware and sex is None:
+            raise ValueError('sex_aware timing requires the sex of the patient.')
+        self.sex = sex
+        self.sex_aware = sex_aware
+        self.continuous_cn = continuous_cn
+        self.clonal_unresolved = clonal_unresolved
+        self.segment_homdels = segment_homdels
+        self.y_callable_blocks = y_callable_blocks
+        self.cn_event_tol = cn_event_tol
+        self.cn_clonal_min_ccf = cn_clonal_min_ccf
+
+    @property
+    def male(self):
+        return self.sex_aware and str(self.sex).upper() in MALE_LABELS
+
+    def is_hemizygous(self, chrN):
+        return self.male and str(chrN).replace('chr', '') in ('X', 'Y')
+
+    @property
+    def extended_output(self):
+        return self.sex_aware or self.continuous_cn or self.clonal_unresolved or self.segment_homdels
+
+
+def _weighted_median(values, weights):
+    values, weights = np.asarray(values, dtype=float), np.asarray(weights, dtype=float)
+    keep = np.isfinite(values) & (weights > 0)
+    if not keep.any():
+        return np.nan
+    values, weights = values[keep], weights[keep]
+    order = np.argsort(values)
+    cumulative = np.cumsum(weights[order])
+    return float(values[order][np.searchsorted(cumulative, 0.5 * cumulative[-1])])
+
 
 class TimingEngine(object):
     """
     Class for holding samples
     """
-    def __init__(self, patient, cn_state_whitelist=Enums.cn_state_whitelist, min_supporting_muts=3):
+    def __init__(self, patient, cn_state_whitelist=Enums.cn_state_whitelist, min_supporting_muts=3, options=None):
+        self.options = options if options is not None else TimingOptions()
         self.patient = patient
         self.genome = patient.genome
         self.cn_state_whitelist = cn_state_whitelist
@@ -43,7 +99,8 @@ class TimingEngine(object):
         n_samples = len(self.sample_list)
         purity = [sample.purity for sample in self.sample_list]
         self.concordant_cn_states = {}
-        for chrN, arm in self.arm_regions:
+        regions = list(self.arm_regions) + ([('Y', '')] if self.options.male else [])
+        for chrN, arm in regions:
             region = chrN + arm
             states_across_samples = {}  # hold union of all copy number states in all samples
             for sample in self.sample_list:
@@ -89,8 +146,15 @@ class TimingEngine(object):
                                            cluster_assignment=mut.cluster_assignment)
                         supporting_muts.append(nd_mut)
                         self.timeable_muts[mut_varstr] = nd_mut
+                    # Across samples, keep the value farthest from the shared integer state so the event is not averaged away.
+                    continuous = [s.continuous for s in states_across_samples[state] if s.continuous is not None]
+                    if continuous:
+                        continuous = tuple(max((c[i] for c in continuous), key=lambda v: abs(v - state[i])) for i in (0, 1))
+                    else:
+                        continuous = None
                     multisample_state = TimingCNState(self.sample_list, chrN, arm, state, purity,
-                                                      supporting_muts=supporting_muts)
+                                                      supporting_muts=supporting_muts, continuous=continuous,
+                                                      cn_type_prefix=states_across_samples[state][0].cn_type_prefix)
                     self.concordant_cn_states[chrN + arm] = multisample_state
 
     def call_wgd(self, concordance_threshold=.8, tol=.2):  # TODO: try other concordance thresholds
@@ -172,6 +236,8 @@ class TimingEngine(object):
                     if np.prod(cluster_ccfs[c][sample_idx, ccf_idx]) > clonal_concordance:
                         is_clonal = False
                         break
+                if (self.options.continuous_cn or etype.startswith('Chrom_')) and min(ccf_hats) < self.options.cn_clonal_min_ccf:
+                    is_clonal = False
                 eve.is_clonal = is_clonal
                 self.all_cn_events.setdefault(eve.event_name, []).append(eve)
                 if is_clonal:
@@ -350,7 +416,11 @@ class TimingEngine(object):
                     }
                 )
                 rec['ccf'][si] = float(getattr(cn, 'ccf_hat', 0.0))
-                rec['pairs'][si] = _best_segment_pair(ts, cn.chrN, start_bp, end_bp, cn.cn_category)
+                if self.options.segment_homdels and cn.cn_category == 'Focal_homdel':
+                    # The call was made on one segment. The lowest modal state in the window need not agree with it.
+                    rec['pairs'][si] = (0., 0.)
+                else:
+                    rec['pairs'][si] = _best_segment_pair(ts, cn.chrN, start_bp, end_bp, cn.cn_category)
 
         if not groups:
             return
@@ -545,6 +615,12 @@ class TimingEngine(object):
         # Small compatibility wrappers in case helper methods were not added
         # ------------------------------------------------------------------
         def _set_not_estimable(ev, reason='insufficient_local_support'):
+            if self.options.clonal_unresolved and getattr(ev, 'is_clonal', False):
+                ev.pi_dist = None
+                ev.timing_status = 'clonal_unresolved'
+                ev.timing_source = None
+                ev.timing_reason = reason
+                return
             if hasattr(ev, 'set_not_estimable'):
                 ev.set_not_estimable(reason)
             else:
@@ -594,7 +670,7 @@ class TimingEngine(object):
             return ev.Type.startswith('Focal_')
 
         def _is_arm(ev):
-            return ev.Type.startswith('Arm_')
+            return ev.Type.startswith(('Arm_', 'Chrom_'))
 
         def _has_support(ev):
             return len(ev.supporting_muts) >= self.min_supporting_muts
@@ -650,6 +726,10 @@ class TimingEngine(object):
                     if not cn_event.is_clonal:
                         cn_event.pi_dist = subclonal_dist.copy()
                         _set_status(cn_event, status='subclonal', source='clonality_rule', reason='event_not_truncal')
+                    elif cn_event.Type.endswith('homdel') and self.options.segment_homdels:
+                        # No copy left: by parsimony both alleles were lost before the genome doubled.
+                        cn_event.get_pi_dist_for_loss(self.WGD)
+                        _set_status(cn_event, status='estimated', source='wgd_rule', reason=None)
                     elif cn_event.Type.endswith('homdel'):
                         # Homdel: no local mutations possible; mark as present
                         cn_event.pi_dist = uniform_dist.copy()
@@ -731,6 +811,9 @@ class TimingEngine(object):
                 # Homdel events cannot be timed from local mutations (no reads
                 # exist in a homozygously deleted region), but they should be
                 # present in the output as identifiable events.
+                if 'homdel' in ev.Type.lower() and self.options.clonal_unresolved:
+                    _set_not_estimable(ev, reason='homdel_no_local_evidence')
+                    continue
                 if 'homdel' in ev.Type.lower():
                     ev.pi_dist = uniform_dist.copy()
                     _set_status(ev, status='prior_only', source='homdel',
@@ -740,6 +823,15 @@ class TimingEngine(object):
                 # No local evidence, but explicit borrowing enabled
                 if borrowed_prior is not None:
                     _set_prior_only(ev, borrowed_prior, source='arm_prior', reason='borrowed_prior_only')
+                    continue
+
+                if self.options.clonal_unresolved:
+                    _set_not_estimable(
+                        ev,
+                        reason='insufficient_local_support' if not _has_support(ev) else
+                        'unsupported_cn_state' if not _state_ok(ev) else
+                        'unsupported_event_type'
+                    )
                     continue
 
                 # Focal events that cannot be locally timed still get a
@@ -772,8 +864,14 @@ class TimingEngine(object):
             if mut.pi_dist is None:
                 if mut.is_clonal:
                     mut.pi_dist = uniform_dist.copy()
+                    if self.options.clonal_unresolved:
+                        mut.timing_status = 'clonal_unresolved'
                 else:
                     mut.pi_dist = subclonal_dist.copy()
+                    if self.options.clonal_unresolved:
+                        mut.timing_status = 'subclonal'
+            elif self.options.clonal_unresolved:
+                mut.timing_status = 'estimated'
 
 
 class TimingSample(object):
@@ -784,6 +882,7 @@ class TimingSample(object):
         self.sample = sample
         self.sample_name = self.sample.sample_name
         self.engine = engine
+        self.options = engine.options
         self.cn_state_whitelist = cn_state_whitelist
         self.purity = self.sample.purity
         self.CnProfile = self.sample.CnProfile
@@ -864,6 +963,7 @@ class TimingSample(object):
             true_arm_bp = end - start
             arm_bp = 0
             state_bps = {}
+            state_segments = {}
             for seg in arm_segtree:
                 if seg.begin < start:
                     seg_len = seg.end - start
@@ -881,23 +981,58 @@ class TimingSample(object):
                 state_tuple = (cn_a1, cn_a2)
                 state_bps.setdefault(state_tuple, 0)
                 state_bps[state_tuple] += seg_len
+                state_segments.setdefault(state_tuple, []).append((seg, seg_len))
             states_over_threshold = [cn for cn, bp in state_bps.items() if bp > arm_bp * size_threshold]
             if arm_bp < true_arm_bp * .5:  # Only call if at least 50% of arm is in segs
                 self.missing_arms.append((chrN, arm))
             elif len(states_over_threshold) == 1:
                 cn_a1, cn_a2 = next(iter(states_over_threshold))
+                continuous = self._continuous_state(state_segments[(cn_a1, cn_a2)]) if self.options.continuous_cn else None
                 if concordant_states is None:
                     supporting_muts = [interval.data for interval in self.mutation_intervaltree[chrN][start:end]
                                        if interval.data.local_cn_a1 == cn_a1 and interval.data.local_cn_a2 == cn_a2]
                     cn_state = TimingCNState([self], chrN, arm, (cn_a1, cn_a2), [self.purity],
-                                             supporting_muts=supporting_muts)
+                                             supporting_muts=supporting_muts, continuous=continuous)
                     self.cn_states[chrN + arm] = cn_state
                 elif chrN + arm in concordant_states:
                     supporting_muts = [interval.data for interval in self.concordant_mutation_intervaltree[chrN][start:end]
                                       if interval.data.local_cn_a1 == cn_a1 and interval.data.local_cn_a2 == cn_a2]
                     cn_state = TimingCNState([self], chrN, arm, (cn_a1, cn_a2), [self.purity],
-                                             supporting_muts=supporting_muts)
+                                             supporting_muts=supporting_muts, continuous=continuous)
                     self.concordant_cn_states[chrN + arm] = cn_state
+        if self.options.male:
+            y_state = self._call_y_state()
+            if y_state is not None:
+                if concordant_states is None:
+                    self.cn_states['Y'] = y_state
+                elif 'Y' in concordant_states:
+                    self.concordant_cn_states['Y'] = y_state
+
+    @staticmethod
+    def _continuous_state(segments):
+        """Length-weighted median of the continuous allelic copy numbers. NaN where the input has none."""
+        lengths = [length for _, length in segments]
+        values = [[seg.data[1].get(key, np.nan) for seg, _ in segments] for key in ('cn_a1_cont', 'cn_a2_cont')]
+        continuous = (_weighted_median(values[0], lengths), _weighted_median(values[1], lengths))
+        return None if np.isnan(continuous).all() else continuous
+
+    def _call_y_state(self, min_callable_fraction=.5):
+        """Whole-chromosome chrY state over callable territory. None if too little of that territory is segmented."""
+        blocks = self.options.y_callable_blocks
+        tree = self.CnProfile['Y']
+        total, values, lengths = sum(end - start for start, end in blocks), [], []
+        for start, end in blocks:
+            for seg in tree.overlap(start, end):
+                length = min(seg.end, end) - max(seg.begin, start)
+                # Total copy number, because a male Y has one allele and the allelic columns are rescued, not modeled.
+                value = seg.data[1].get('total_cn_cont', np.nan)
+                values.append(value if np.isfinite(value) else float(seg.data[1]['cn_a1']) + float(seg.data[1]['cn_a2']))
+                lengths.append(length)
+        if sum(lengths) < min_callable_fraction * total:
+            return None
+        y_cn = _weighted_median(values, lengths)
+        return TimingCNState([self], 'Y', '', (0., float(round(y_cn))), [self.purity], supporting_muts=[],
+                             continuous=(0., y_cn), cn_type_prefix='Chrom')
 
     def call_wgd(self, use_concordant_states=False):
         """
@@ -911,6 +1046,8 @@ class TimingSample(object):
             if self.WGD is None:
                 return
             for cn_state in self.concordant_cn_states.values():
+                if cn_state.cn_type_prefix == 'Chrom':
+                    continue
                 if cn_state.cn_a1 == 0 or cn_state.cn_a1 >= 2 and cn_state.cn_a2 >= 2:  # region supports WGD if 0/2 or 2/2
                     supporting_arm_states.append(TimingCNState([self], cn_state.chrN, cn_state.arm,
                         (cn_state.cn_a1, cn_state.cn_a2), cn_state.purity, supporting_muts=cn_state.supporting_muts))
@@ -919,6 +1056,8 @@ class TimingSample(object):
                 cn_state.call_events(wgd=True)
         else:
             for cn_state in self.cn_states.values():
+                if cn_state.cn_type_prefix == 'Chrom':
+                    continue
                 if cn_state.cn_a2 >= 2:
                     supporting_arm_states.append(cn_state)
                 if (cn_state.cn_a1 == 0 or cn_state.cn_a1 >= 2) and cn_state.cn_a2 >= 2:  # region supports WGD if 0/2 or 2/2
@@ -991,13 +1130,18 @@ class TimingCNState(object):
     Arm events are timed based on copy number state of both arms
     """
 
-    def __init__(self, sample_list, chrN, arm, cn_state, purity, supporting_muts=None, cn_type_prefix='Arm'):
+    def __init__(self, sample_list, chrN, arm, cn_state, purity, supporting_muts=None, cn_type_prefix='Arm',
+                 continuous=None):
         self.sample_list = sample_list
+        self.options = getattr(sample_list[0], 'options', None) or TimingOptions()
         self.chrN = chrN
         self.arm = arm
         self.cn_a1, self.cn_a2 = cn_state
         self.purity = purity
         self.supporting_muts = supporting_muts
+        self.cn_type_prefix = cn_type_prefix
+        self.continuous = continuous  # (a1, a2) continuous copy number, or None to use the integer state
+        self.haploid = self.options.is_hemizygous(chrN)
         self.cn_events = None
         self.call_events(cn_type_prefix=cn_type_prefix)
 
@@ -1012,12 +1156,51 @@ class TimingCNState(object):
             if self.cn_a1 == 1.:  # for 1/2 even if event happened last p2 should not exceed .5
                 return np.linspace(0, .5, 101)
 
-    def call_events(self, cn_type_prefix='Arm', wgd=False):
+    def _call_events_continuous(self, cn_type_prefix, wgd):
+        """
+        Events relative to the normal state, with presence and CCF taken from continuous copy number where available.
+        A hemizygous chromosome has one allele, so a1 = 0 is its normal state and never an event.
+        """
+        baseline = 2. if wgd else 1.
+        tol = self.options.cn_event_tol
+        continuous = self.continuous if self.continuous is not None else (self.cn_a1, self.cn_a2)
+        values = [continuous[i] if np.isfinite(continuous[i]) else state for i, state in enumerate((self.cn_a1, self.cn_a2))]
+
+        def coerce(value):
+            if abs(value - baseline) < tol:
+                return baseline
+            if baseline - 1 <= value < baseline:
+                return baseline - 1
+            if baseline < value <= baseline + 1:
+                return baseline + 1
+            return float(round(value))
+
+        cn_a1 = 0. if self.haploid else coerce(values[0])
+        cn_a2 = coerce(values[1])
+        kwargs = dict(chrN=self.chrN, arm=self.arm, supporting_muts=self.supporting_muts)
+        if cn_a1 == 0 and cn_a2 == 0 and cn_type_prefix == 'Focal':
+            self.cn_events.append(TimingCNEvent(self.sample_list, self, Type=cn_type_prefix + '_homdel', copy_number='0/0',
+                                                allelic_cn=0, ccf_hat=1., **kwargs))
+            return
+        alleles = [(cn_a2, values[1])] if self.haploid else [(cn_a1, values[0]), (cn_a2, values[1])]
+        for cn, value in alleles:
+            if cn == baseline:
+                continue
+            cn_type = cn_type_prefix + ('_gain' if value > baseline else '_loss')
+            self.cn_events.append(TimingCNEvent(self.sample_list, self, Type=cn_type, allelic_cn=cn,
+                                                copy_number=str(cn_a1) + '/' + str(cn_a2),
+                                                ccf_hat=min(abs(value - baseline), 1.), **kwargs))
+
+    def call_events(self, cn_type_prefix=None, wgd=False):
         """
         create cn event instances for events (gain for 1/2, gain and loss for 0/2, two gains for 2/2)
         Also handles homozygous deletion (0/0) as a single homdel event.
         """
+        cn_type_prefix = cn_type_prefix or self.cn_type_prefix
         self.cn_events = []
+        if self.haploid or self.continuous is not None:
+            self._call_events_continuous(cn_type_prefix, wgd)
+            return
         baseline = 2. if wgd else 1.
         if baseline - 1 <= self.cn_a1 < baseline:
             cn_a1 = baseline - 1
@@ -1035,7 +1218,7 @@ class TimingCNState(object):
         # Homozygous deletion: both alleles at 0 — only meaningful for focal events.
         # Arm-level (0,0) is almost certainly due to inaccurate CN inference and
         # should be treated as two independent losses (original behavior).
-        if cn_a1 == 0 and cn_a2 == 0 and not wgd and cn_type_prefix == 'Focal':
+        if cn_a1 == 0 and cn_a2 == 0 and (not wgd or self.options.segment_homdels) and cn_type_prefix == 'Focal':
             cn_type = cn_type_prefix + '_homdel'
             ccf_hat = min(baseline, 1.)
             self.cn_events.append(TimingCNEvent(self.sample_list, self, Type=cn_type, chrN=self.chrN, arm=self.arm,
@@ -1123,6 +1306,8 @@ class TimingCNEvent(object):
     def event_name(self):
         if self.Type.startswith('Arm_'):
             return self.Type[4:] + '_' + self.chrN + self.arm
+        if self.Type.startswith('Chrom_'):
+            return self.Type[6:] + '_' + self.chrN
         if self.Type.startswith('Focal_'):
             # Use coordinate-based naming to avoid key collisions when multiple
             # focal intervals map to the same cytoband(s).
@@ -1325,6 +1510,7 @@ class TimingMut(object):
         self.pi_dist = pi_dist
         self.mult_lik_dict = {}
         self.log_mult_dist = None
+        self.timing_status = None
 
     def __eq__(self, other):
         if not isinstance(other, TimingMut):

@@ -446,6 +446,53 @@ def build_parser():
                                dest='run_comparisons',
                                default=False,
                                help='Also write the legacy driver/CN timing comparison table and HTML report.')
+    timing_parent.add_argument('--sex_aware',
+                               action='store_true',
+                               dest='sex_aware',
+                               default=False,
+                               help='Treat male X and Y as hemizygous and call chrY as one event over callable territory. '
+                                    'Needs a sex column in the SIF.')
+    timing_parent.add_argument('--continuous_cn',
+                               action='store_true',
+                               dest='continuous_cn',
+                               default=False,
+                               help='Call arm events and their CCF from continuous copy number, not the modal integer state.')
+    timing_parent.add_argument('--clonal_unresolved',
+                               action='store_true',
+                               dest='clonal_unresolved',
+                               default=False,
+                               help='Clonal events without timing evidence win against subclonal events, '
+                                    'and stay unknown against clonal ones.')
+    timing_parent.add_argument('--segment_homdels',
+                               action='store_true',
+                               dest='segment_homdels',
+                               default=False,
+                               help='Call focal homozygous deletions per segment from copy number and noise, '
+                                    'not from the modal state of the focal window.')
+    timing_parent.add_argument('--homdel_artifact_file',
+                               type=str,
+                               action='store',
+                               dest='homdel_artifact_file',
+                               default=None,
+                               help='Regions of known artifactual homozygous deletions: chromosome, start, end.')
+    timing_parent.add_argument('--homdel_max_length',
+                               type=int,
+                               action='store',
+                               dest='homdel_max_length',
+                               default=5000000,
+                               help='Longest segment accepted as a homozygous deletion, in bp.')
+    timing_parent.add_argument('--homdel_min_posterior',
+                               type=float,
+                               action='store',
+                               dest='homdel_min_posterior',
+                               default=0.95,
+                               help='Minimum posterior of copy number 0 against copy number 1 for a homozygous deletion.')
+    timing_parent.add_argument('--cn_clonal_min_ccf',
+                               type=float,
+                               action='store',
+                               dest='cn_clonal_min_ccf',
+                               default=0.8,
+                               help='With --continuous_cn or --sex_aware: copy-number events below this CCF are subclonal.')
 
     timing = subparsers.add_parser("Timing", help="Time somatic events in one or multiple samples.",
                                    parents=[base_parser, timing_parent])
@@ -615,6 +662,11 @@ def build_parser():
                              action='store',
                              default=5,
                              help='maximum number of focal CNV events')
+    leaguemodel.add_argument('--event_information',
+                             action='store_true',
+                             dest='event_information',
+                             default=False,
+                             help='Write <cohort>.event_information.tsv: informative games and draw fraction per event.')
     leaguemodel.add_argument('--max_num_homdel',
                              type=int,
                              action='store',

@@ -21,6 +21,14 @@ na_values = {'-1.#IND', '1.#QNAN', '1.#IND', '-1.#QNAN', '#N/A', 'N/A', 'NA', '#
              '-nan', ''}  # http://pandas.pydata.org/pandas-docs/stable/io.html#na-values
 
 
+def _float_or_nan(row, key):
+    """Optional numeric segment column: a missing or empty value must not drop the segment."""
+    try:
+        return float(row[key])
+    except (KeyError, TypeError, ValueError):
+        return float('nan')
+
+
 class TumorSample:
     """CLASS info
 
@@ -470,6 +478,12 @@ class TumorSample:
                         local_cn_a2 = int(float(row['modal.a2']))
                         seg_tree[chrN].add(Interval(start, end,
                                                     (self.sample_name, {'cn_a1': local_cn_a1, 'cn_a2': local_cn_a2,
+                                                                        'cn_a1_cont': _float_or_nan(row, 'rescaled.cn.a1'),
+                                                                        'cn_a2_cont': _float_or_nan(row, 'rescaled.cn.a2'),
+                                                                        'total_cn_cont': _float_or_nan(row, 'rescaled_total_cn'),
+                                                                        'copy_ratio': _float_or_nan(row, 'total_copy_ratio'),
+                                                                        'seg_sigma': _float_or_nan(row, 'seg_sigma'),
+                                                                        'n_probes': _float_or_nan(row, 'n_probes'),
                                                                         'ccf_hat_a1': ccf_hat_a1,
                                                                         'ccf_high_a1': ccf_high_a1,
                                                                         'ccf_low_a1': ccf_low_a1,

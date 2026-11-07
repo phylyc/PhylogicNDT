@@ -59,6 +59,7 @@ class Patient:
 
         # DECLARATIONS
         self.indiv_name = indiv_name
+        self.hemizygous_chroms = set()  # chromosomes with one allele, filled for male patients by the Timing tool
         # :type : list [TumorSample]
         self.sample_list = []
         self.rna_sample_list = []
@@ -554,7 +555,73 @@ class Patient:
                     self._add_cn_event_to_samples(chrom, min(bands), max(bands), arm, cns, mut_category, ccf_hat, ccf_high, ccf_low, a1, dupe=not a1)
         self.concordant_cn_tree = c_trees
 
-    def add_focal_cn_events(self, focal_regions, qval_max=None, focal_max_arm_frac=0.3, min_bp_overlap=1000, padding=100000, require_directional_consistency=False, split_across_centromere=True):
+    def _read_homdel_artifacts(self, path):
+        """Regions where apparent homozygous deletions are known artifacts: chromosome, start, end, other columns ignored."""
+        artifacts = defaultdict(list)
+        if path:
+            with open(path) as handle:
+                for line in handle:
+                    if line.startswith('#') or not line.strip():
+                        continue
+                    fields = line.split()
+                    artifacts[fields[0].replace('chr', '')].append((int(fields[1]), int(fields[2])))
+        return artifacts
+
+    @staticmethod
+    def _copies_per_copy_ratio(sample):
+        """Copy-number units per copy-ratio unit, read off the sample's autosomal segments, which lie on one line."""
+        if not hasattr(sample, '_copies_per_copy_ratio'):
+            points = [(iv.data[1]['copy_ratio'], iv.data[1]['total_cn_cont'])
+                      for chrom, tree in sample.CnProfile.items() if chrom not in ('X', 'Y') for iv in tree]
+            points = np.array([p for p in points if np.isfinite(p[0]) and np.isfinite(p[1])])
+            sample._copies_per_copy_ratio = np.polyfit(points[:, 0], points[:, 1], 1)[0] if len(points) >= 2 else np.nan
+        return sample._copies_per_copy_ratio
+
+    def _segment_homdel_call(self, sample, chrom, start, end, artifacts, max_length, min_posterior, min_probes=5,
+                             min_overlap=1000, flank_bp=1000000, min_sd=0.1):
+        """
+        Homozygous deletion in [start, end): one segment whose copy number is 0 rather than 1, given its noise.
+
+        The modal state of a whole window cannot do this: windows are megabases long, and modal 0/0 can come from
+        rounding at low purity. CCF is the depth of the drop relative to the copy number flanking the segment.
+        Returns (ccf_hat, ccf_high, ccf_low) of the best-supported segment, or None if no segment qualifies.
+        """
+        tree = sample.CnProfile[chrom]
+        slope = self._copies_per_copy_ratio(sample)
+        if chrom in self.hemizygous_chroms:
+            slope = slope / 2.  # one copy changes the copy ratio twice as much on a hemizygous chromosome
+        best = None
+        for iv in tree.overlap(start, end):
+            seg = iv.data[1]
+            if min(iv.end, end) - max(iv.begin, start) < min_overlap or iv.length() > max_length:
+                continue
+            copies = seg.get('total_cn_cont', np.nan)
+            if not np.isfinite(copies) or not seg.get('n_probes', 0) >= min_probes:
+                continue
+            if any(min(iv.end, e) - max(iv.begin, s) >= .5 * iv.length() for s, e in artifacts.get(chrom, ())):
+                continue
+            sd = max(seg.get('seg_sigma', np.nan) * slope, min_sd)
+            if not np.isfinite(sd):
+                sd = min_sd
+            copies = max(copies, 0.)
+            log_odds = ((copies - 1.) ** 2 - copies ** 2) / (2. * sd ** 2)  # copy number 0 against copy number 1
+            posterior = 1. / (1. + np.exp(-np.clip(log_odds, -700, 700)))
+            if posterior < min_posterior or (best is not None and posterior <= best[0]):
+                continue
+            flanks = [(other.data[1].get('total_cn_cont', np.nan), other.length())
+                      for other in tree.overlap(iv.begin - flank_bp, iv.end + flank_bp) if other != iv]
+            flanks = [(value, length) for value, length in flanks if np.isfinite(value) and value >= .5]
+            flank_cn = 1.
+            if flanks:
+                order = sorted(flanks)
+                halfway = .5 * sum(length for _, length in order)
+                flank_cn = max(next(value for value, cumulative in zip(
+                    (v for v, _ in order), itertools.accumulate(length for _, length in order)) if cumulative >= halfway), 1.)
+            ccf = lambda value: float(np.clip(1. - max(value, 0.) / flank_cn, 0., 1.))
+            best = (posterior, ccf(copies), ccf(copies - 1.96 * sd), ccf(copies + 1.96 * sd))
+        return None if best is None else best[1:]
+
+    def add_focal_cn_events(self, focal_regions, qval_max=None, focal_max_arm_frac=0.3, min_bp_overlap=1000, padding=100000, require_directional_consistency=False, split_across_centromere=True, segment_homdels=None):
         """
         Add focal CNV events (e.g., from GISTIC2 peaks) as CopyNumberEvents.
 
@@ -571,7 +638,10 @@ class Patient:
             require_directional_consistency: if True, for each sample+allele, if overlapping segments
                 include both gains and losses (relative to CN=1), treat that sample/allele as neutral for this focal.
             split_across_centromere: if True, split windows crossing the centromere into p and q parts; otherwise skip.
+            segment_homdels: None keeps the window-mode homdel definition. A dict with artifact_file, max_length and
+                min_posterior calls homdels per segment instead, see _segment_homdel_call.
         """
+        homdel_artifacts = self._read_homdel_artifacts(segment_homdels['artifact_file']) if segment_homdels else {}
 
         # --- helpers ---
         def _normalize_focals(focals):
@@ -643,6 +713,8 @@ class Patient:
             cn_prof = sample.CnProfile
             if not cn_prof or chrom not in cn_prof:
                 return 1, 0.0, 0.0, 0.0
+            if allele_key == 'a1' and chrom in self.hemizygous_chroms:
+                return 1, 0.0, 0.0, 0.0  # no second allele to lose
 
             overlaps = list(cn_prof[chrom].overlap(min(0, s - padding), e + padding))
             if not overlaps:
@@ -746,6 +818,23 @@ class Patient:
                     # Any sample with CN=0 on BOTH alleles → homdel carrier
                     homdel_carriers = {i for i in range(n_samp) if cn_a1[i] == 0 and cn_a2[i] == 0}
                     is_homdel = len(homdel_carriers) > 0
+
+                    if segment_homdels is not None:
+                        is_homdel = False
+                        calls = [None] * n_samp
+                        if R.get('type') in ('DEL', 'DELETION', None):
+                            calls = [self._segment_homdel_call(sample, chrom, s0, e0, homdel_artifacts,
+                                                               segment_homdels['max_length'], segment_homdels['min_posterior'])
+                                     if sample.CnProfile else None for sample in self.sample_list]
+                        if any(call is not None for call in calls):
+                            none = (0., 0., 0.)
+                            self._add_cn_event_to_samples(chrom=chrom, start=s0, end=e0, arm=arm_lbl,
+                                                          cns=tuple(1 if call is None else 0 for call in calls),
+                                                          cn_category='Focal_homdel',
+                                                          ccf_hat=tuple((call or none)[0] for call in calls),
+                                                          ccf_high=tuple((call or none)[1] for call in calls),
+                                                          ccf_low=tuple((call or none)[2] for call in calls),
+                                                          a1=True, dupe=False)
 
                     if is_homdel and R.get('type') in ('DEL', 'DELETION', None):
                         # Per-sample CN: 0 for carriers, 1 (neutral) for non-carriers.

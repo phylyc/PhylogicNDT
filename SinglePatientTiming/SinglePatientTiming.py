@@ -8,7 +8,7 @@ from LeagueModel.LeagueModelData import event_matches_selector, parse_harmonized
 from SinglePatientTiming import TimingEngine
 from output.PhylogicOutput import PhylogicOutput
 
-TimedEvent = namedtuple('TimedEvent', ['event_name', 'pi_dist'])
+TimedEvent = namedtuple('TimedEvent', ['event_name', 'pi_dist', 'timing_status'], defaults=(None,))
 
 
 def run_tool(args):
@@ -18,8 +18,13 @@ def run_tool(args):
                            indiv_name=args.indiv_id, artifact_whitelist=args.artifact_whitelist,
                            driver_genes_file=args.driver_genes_file, genome_build=args.genome_build)
 
+    sex = None
     if args.sif:  # if sif file is specified
         sif = pd.read_csv(args.sif, sep="\t")
+        if args.sex_aware:
+            if 'sex' not in sif.columns or sif['sex'].nunique() != 1:
+                raise ValueError('--sex_aware needs a sex column in the SIF with one value per patient.')
+            sex = sif['sex'].iloc[0]
         for _, row in sif.iterrows():
             patient_data.addSample(
                 row['maf_fn'],
@@ -34,6 +39,8 @@ def run_tool(args):
             )
 
     else:  # if sample names/files are specified directly on cmdline
+        if args.sex_aware:
+            raise ValueError('--sex_aware needs a SIF with a sex column.')
 
         # sort order on timepoint or order of entry on cmdline if not present
         print(args.sample_data)
@@ -50,16 +57,25 @@ def run_tool(args):
                                    timepoint_value=timepoint, grid_size=args.grid_size,
                                    _additional_muts=None, seg_file=seg_fn, purity=purity)
 
+    options = TimingEngine.TimingOptions(sex=sex, sex_aware=args.sex_aware, continuous_cn=args.continuous_cn,
+                                         clonal_unresolved=args.clonal_unresolved, segment_homdels=args.segment_homdels,
+                                         cn_clonal_min_ccf=args.cn_clonal_min_ccf)
+    if options.male:
+        patient_data.hemizygous_chroms = {'X', 'Y'}
     if args.intersect_cn_trees:
         patient_data.intersect_cn_trees()
     else:
         patient_data.get_arm_level_cn_events()
         if args.gistic_fn:
-            patient_data.add_focal_cn_events(focal_regions=args.gistic_fn)
+            segment_homdels = None
+            if args.segment_homdels:
+                segment_homdels = dict(artifact_file=args.homdel_artifact_file, max_length=args.homdel_max_length,
+                                       min_posterior=args.homdel_min_posterior)
+            patient_data.add_focal_cn_events(focal_regions=args.gistic_fn, segment_homdels=segment_homdels)
     patient_data.preprocess_samples()
     if args.min_supporting_muts < 1:
         raise ValueError('Invalid value for min_supporting_muts')
-    timing_engine = TimingEngine.TimingEngine(patient_data, min_supporting_muts=args.min_supporting_muts)
+    timing_engine = TimingEngine.TimingEngine(patient_data, min_supporting_muts=args.min_supporting_muts, options=options)
     timing_engine.time_events()
     phylogicoutput = PhylogicOutput()
     phylogicoutput.write_timing_tsv(timing_engine)
@@ -90,6 +106,7 @@ def read_timed_events(timing_tsv, event_file=None, compare_all=False):
         if col.strip().lower() in ('event class', 'event_class', 'class', 'mutation_class', 'coding_class')
     ]
     class_col = class_cols[0] if class_cols else None
+    has_status = 'timing_status' in timing_df.columns
 
     if event_file:
         with open(event_file) as f:
@@ -115,15 +132,16 @@ def read_timed_events(timing_tsv, event_file=None, compare_all=False):
         if class_col is not None and row[class_col] == row[class_col]:
             event_class = str(row[class_col]).strip() or None
         pi_dist = None if np.isnan(pi).all() else pi
+        status = row['timing_status'] if has_status and isinstance(row['timing_status'], str) else None
 
         if event_name in timing_by_event:
             duplicate_event_counts[event_name] = duplicate_event_counts.get(event_name, 1) + 1
-            prev_pi_dist, prev_event_class = timing_by_event[event_name]
+            prev_pi_dist, prev_event_class, prev_status = timing_by_event[event_name]
             if prev_pi_dist is None and pi_dist is not None:
-                timing_by_event[event_name] = (pi_dist, event_class or prev_event_class)
+                timing_by_event[event_name] = (pi_dist, event_class or prev_event_class, status)
             continue
 
-        timing_by_event[event_name] = (pi_dist, event_class)
+        timing_by_event[event_name] = (pi_dist, event_class, status)
 
     if duplicate_event_counts:
         duplicate_msg = ', '.join(
@@ -137,7 +155,7 @@ def read_timed_events(timing_tsv, event_file=None, compare_all=False):
         )
 
     if compare_all and not event_file:
-        return [TimedEvent(event_name, pi_dist) for event_name, (pi_dist, _) in timing_by_event.items()]
+        return [TimedEvent(event_name, pi_dist, status) for event_name, (pi_dist, _, status) in timing_by_event.items()]
 
     events = []
     selected_raw_events = set()
@@ -145,9 +163,9 @@ def read_timed_events(timing_tsv, event_file=None, compare_all=False):
     class_selectors_without_classes = []
     for selector in selected_events:
         matched_events = []
-        for event_name, (pi_dist, event_class) in timing_by_event.items():
+        for event_name, (pi_dist, event_class, status) in timing_by_event.items():
             if event_matches_selector(event_name, selector, event_class=event_class):
-                matched_events.append((event_name, pi_dist))
+                matched_events.append((event_name, pi_dist, status))
 
         if not matched_events:
             missing_selectors.append(selector)
@@ -156,10 +174,10 @@ def read_timed_events(timing_tsv, event_file=None, compare_all=False):
         if parse_harmonized_point_event(selector) is not None and class_col is None:
             class_selectors_without_classes.append(selector)
 
-        for event_name, pi_dist in matched_events:
+        for event_name, pi_dist, status in matched_events:
             if event_name in selected_raw_events:
                 continue
-            events.append(TimedEvent(event_name, pi_dist))
+            events.append(TimedEvent(event_name, pi_dist, status))
             selected_raw_events.add(event_name)
 
     if missing_selectors:
@@ -257,6 +275,15 @@ def compare_event_list(all_events, uncertainty_bins=5, uniform_atol=1e-6):
     comps = {}
 
     for eve1, eve2 in itertools.combinations(all_events, 2):
+        # A clonal event precedes the most recent common ancestor, and a subclonal event follows it.
+        status1, status2 = getattr(eve1, 'timing_status', None), getattr(eve2, 'timing_status', None)
+        if status1 == 'clonal_unresolved' and status2 == 'subclonal':
+            comps[(eve1.event_name, eve2.event_name)] = (1.0, 0.0, 0.0)
+            continue
+        if status1 == 'subclonal' and status2 == 'clonal_unresolved':
+            comps[(eve1.event_name, eve2.event_name)] = (0.0, 1.0, 0.0)
+            continue
+
         # Either event has no informative timing → fully unknown.
         if _is_uninformative(eve1.pi_dist) or _is_uninformative(eve2.pi_dist):
             comps[(eve1.event_name, eve2.event_name)] = (0.0, 0.0, 1.0)
