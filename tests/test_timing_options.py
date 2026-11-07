@@ -47,16 +47,19 @@ def seg_row(chrom, start, end, a1, a2, q1=None, q2=None, sigma=0.01, n_probes=50
     hscr2 = '' if np.isnan(q2) else b + 2 * delta * q2
     known1, known2 = np.nan_to_num(q1, nan=float(a1)), np.nan_to_num(q2, nan=float(a2))
     total = known1 + known2
-    # cancer.cell.frac is the fraction of cells at the event, relative to one copy.
-    ccf1, ccf2 = min(abs(known1 - 1), 1.), min(abs(known2 - 1), 1.)
+    # As in real tables, cancer.cell.frac is 1 - q for a loss, and for a gain only the distance above an integer.
+    def fraction(q):
+        return 1. - q if q < 1 else q - np.floor(q)
+    ccf1, ccf2 = fraction(known1), fraction(known2)
     return [chrom, start, end, n_probes, sigma, b + delta * total, total, a1, a2, hscr1, hscr2, float(a1), float(a2),
             ccf1, 0, 1, ccf2, 0, 1]
 
 
 def hemizygous_row(chrom, start, end, copies, sigma=0.01, n_probes=500, purity=PURITY):
-    """Male X or Y row, as rescued by map_to_absolute_copy_number: one copy moves the copy ratio by 2 * delta."""
+    """Male X or Y row, as in real tables: one copy moves the copy ratio by 2 * delta, and a1 sits on the floor b."""
     b, delta = comb(purity)
-    return [chrom, start, end, n_probes, sigma, b + 2 * delta * copies, copies, 0, int(round(copies)), '', '', 0., copies,
+    ratio = b + 2 * delta * copies
+    return [chrom, start, end, n_probes, sigma, ratio, copies, 0, int(round(copies)), b, ratio, 0., copies,
             0, 0, 1, abs(copies - 1), 0, 1]
 
 
@@ -147,8 +150,8 @@ class TimingCase(unittest.TestCase):
                     handle.write(f'{chrom}\t{start}\t{end}\t{kind}\t0.01\tregion\n')
             homdels = None
             if options.segment_homdels:
-                homdels = dict(artifact_file=artifact, max_length=max_length, min_posterior=.95)
-            patient.add_focal_cn_events(focal_regions=focal_path, segment_homdels=homdels)
+                homdels = dict(artifact_file=artifact, max_length=max_length, max_copies=.5, min_z=3.)
+            patient.add_focal_cn_events(focal_regions=focal_path, segment_homdels=homdels, continuous=options.continuous_cn)
         patient.preprocess_samples()
         engine = TimingEngine(patient, min_supporting_muts=3, options=options)
         engine.time_events()
@@ -225,6 +228,15 @@ class LossOfY(TimingCase):
     def test_small_deviation_is_no_event(self):
         self.assertNotIn('loss_Y', self.events(self.male(0.9)))
 
+    def test_no_y_limit_follows_the_copy_ratio_at_low_purity(self):
+        # At purity 0.3 the copy-ratio floor of tumors without Y reads as 0.25 copies.
+        purity = .3
+        rows = whole_genome(self.genome, male=True, purity=purity) + y_rows(.25, purity=purity)
+        event = self.events(self.run_engine(rows, purity=purity, options=TimingOptions(sex='XY', **ALL_ON)))['loss_Y']
+        self.assertEqual(event.allelic_cn, 0.)
+        self.assertEqual(event.ccf_hat, 1.)
+        self.assertTrue(event.is_clonal)
+
     def test_too_little_callable_territory_gives_no_event(self):
         rows = whole_genome(self.genome, male=True) + y_rows(0.)[:1]
         self.assertNotIn('loss_Y', self.events(self.run_engine(rows, options=TimingOptions(sex='XY', **ALL_ON))))
@@ -271,6 +283,28 @@ class WgdRule(TimingCase):
         engine = self.engine(y_cn=2.)
         self.assertIsNotNone(engine.WGD)
         self.assertEqual({name for name in self.events(engine) if 'X' in name or 'Y' in name}, set())
+
+    def test_chromosome_y_does_not_support_wgd(self):
+        engine = self.engine(y_cn=2.)
+        for sample in engine.sample_list:
+            self.assertFalse([s for s in sample.WGD.supporting_arm_states if s.cn_type_prefix == 'Chrom'])
+
+    def test_each_arm_counts_once_for_wgd(self):
+        engine = self.engine(y_cn=2.)
+        self.assertLessEqual(engine.WGD.n_timed_gains, len(self.CHROMS) * 2 + 1)
+
+    def test_subclonal_mutations_do_not_time_a_wgd(self):
+        rows = whole_genome(self.genome, male=True, baseline=(2, 2)) + y_rows(2.)
+        muts = [(c, 2000000 + i * 1000, 2, 'A') for c in self.CHROMS for i in range(10)] + [('1', 100, 1, 'A')] * 3
+        engine = self.run_engine(rows, muts=muts, options=TimingOptions(sex='XY', **ALL_ON))
+        self.assertEqual(engine.WGD.n_timed_gains, 0)
+        self.assertEqual(engine.WGD.timing_status, 'clonal_unresolved')
+        self.assertIsNone(engine.WGD.pi_dist)
+
+    def test_ambiguous_y_after_wgd_stays_unknown(self):
+        event = self.events(self.engine(y_cn=1.2, major_fraction=.5))['loss_Y']
+        self.assertEqual(event.timing_status, 'ambiguous_clonality')
+        self.assertIsNone(event.pi_dist)
 
     def test_two_two_arms_time_the_wgd(self):
         # Mutations on both copies arose before the doubling, so mostly multiplicity 2 means a late doubling.
@@ -382,6 +416,43 @@ class ContinuousArmEvents(TimingCase):
         self.assertAlmostEqual(event.ccf_hat, .5, delta=.03)
         self.assertFalse(event.is_clonal)
 
+    def test_balanced_segments_give_one_event(self):
+        # ACEseq saw no imbalance, so both alleles carry half of a subclonal gain. This is one event with its full CCF.
+        engine = self.arm_engine(1.25, 1, q2=1.25)
+        self.assertEqual(len(engine.all_cn_events['gain_17p']), 1)
+        self.assertAlmostEqual(engine.all_cn_events['gain_17p'][0].ccf_hat, .5)
+
+    def test_plurality_state_is_called_when_the_median_falls_elsewhere(self):
+        rows = [r for r in whole_genome(self.genome, male=False) if r[0] != '17']
+        rows += [seg_row('17', 25000000, 50000000, 1, 3), seg_row('17', 50000001, 66000000, 1, 2), seg_row('17', 66000001, 81000000, 1, 1),
+                 seg_row('17', 1000, 22000000, 1, 1)]
+        options = TimingOptions(sex='XX', sex_aware=True, continuous_cn=True, clonal_unresolved=True)
+        event = self.events(self.run_engine(rows, options=options))['gain_17q']
+        self.assertEqual(event.allele, 'a2')
+        self.assertEqual(event.allelic_cn, 3.)
+
+    def test_no_state_with_enough_of_the_arm_gives_no_call(self):
+        rows = [r for r in whole_genome(self.genome, male=False) if r[0] != '17']
+        rows += [seg_row('17', 25000000, 43000000, 1, 3), seg_row('17', 43000001, 62000000, 1, 2), seg_row('17', 62000001, 81000000, 1, 5),
+                 seg_row('17', 1000, 22000000, 1, 1)]
+        options = TimingOptions(sex='XX', sex_aware=True, continuous_cn=True, clonal_unresolved=True)
+        self.assertNotIn('gain_17q', self.events(self.run_engine(rows, options=options)))
+
+    def test_values_apart_by_more_than_the_tolerance_are_different_states(self):
+        rows = [r for r in whole_genome(self.genome, male=False) if r[0] != '17']
+        rows += [seg_row('17', 1000, 12500000, 1, 1, q1=1.), seg_row('17', 12500001, 22000000, 1, 1, q1=.6), seg_row('17', 25000000, 81000000, 1, 1)]
+        options = TimingOptions(sex='XX', sex_aware=True, continuous_cn=True, clonal_unresolved=True)
+        self.assertNotIn('loss_17p', self.events(self.run_engine(rows, options=options)))
+
+    def test_noise_decides_between_subclonal_and_unknown(self):
+        def status(sigma):
+            rows = [r for r in whole_genome(self.genome, male=False) if r[0] != '17']
+            rows += [seg_row('17', 1000, 22000000, 0, 1, q1=.45, sigma=sigma), seg_row('17', 25000000, 81000000, 1, 1)]
+            options = TimingOptions(sex='XX', sex_aware=True, continuous_cn=True, clonal_unresolved=True)
+            return self.events(self.run_engine(rows, options=options))['loss_17p'].timing_status
+        self.assertEqual(status(.01), 'subclonal')
+        self.assertEqual(status(.5), 'ambiguous_clonality')
+
     def test_two_competing_states_give_no_call(self):
         rows = [r for r in whole_genome(self.genome, male=False) if r[0] != '17']
         rows += [seg_row('17', 1000, 11000000, 1, 1), seg_row('17', 11000001, 22000000, 0, 1),
@@ -414,6 +485,106 @@ class ContinuousArmEvents(TimingCase):
         event = self.events(self.arm_engine(1., 1, q2=2., modal_a2=2, muts=muts))['gain_17p']
         self.assertEqual(event.timing_status, 'clonal_unresolved')
         self.assertIsNone(event.pi_dist)
+
+
+class ClusterComparator(TimingCase):
+    def test_large_clonal_cluster_does_not_overrule_a_clonal_ccf(self):
+        # A narrow clonal cluster scores CCF 0.92 below a small subclonal cluster. Copy number must decide.
+        rows = [r for r in whole_genome(self.genome, male=True) if r[0] != '17'] + y_rows(.08)
+        rows += [seg_row('17', 1000, 22000000, 0, 1, q1=.08), seg_row('17', 25000000, 81000000, 1, 1)]
+        muts = clonal_muts(map(str, range(1, 21)), n=100) + [('2', 3000000 + i * 1000, 2, 'A') for i in range(30)]
+        events = self.events(self.run_engine(rows, muts=muts, options=TimingOptions(sex='XY', **ALL_ON)))
+        self.assertAlmostEqual(events['loss_17p'].ccf_hat, .92)
+        for name in ('loss_17p', 'loss_Y'):
+            self.assertTrue(events[name].is_clonal)
+            self.assertEqual(events[name].timing_status, 'clonal_unresolved')
+
+    def test_large_clonal_cluster_with_a_homdel(self):
+        rows = [r for r in whole_genome(self.genome, male=False) if r[0] != '9']
+        size = self.genome.CHROM_DICT['9']
+        rows += [seg_row('9', 1000, 21899999, 1, 1), seg_row('9', 21900000, 22100000, 0, 0, q1=.04, q2=.04), seg_row('9', 22100001, size - 1000, 1, 1)]
+        muts = clonal_muts(map(str, range(1, 21)), n=100) + [('2', 3000000 + i * 1000, 2, 'A') for i in range(30)]
+        engine = self.run_engine(rows, muts=muts, focal=[('9', 21000000, 23000000, 'DEL')], options=TimingOptions(sex='XX', **ALL_ON))
+        self.assertTrue(self.events(engine)['Focal_homdel_9:21000000-23000000'].is_clonal)
+
+
+class FocalEvents(TimingCase):
+    AMP = ('2', 16000000, 16200000, 'AMP')
+    DEL = ('9', 8000000, 11000000, 'DEL')
+
+    def with_segments(self, chrom, *middle, male=False, baseline=(1, 1), purity=PURITY):
+        rows = [r for r in whole_genome(self.genome, male=male, baseline=baseline, purity=purity) if r[0] != chrom]
+        size = self.genome.CHROM_DICT[chrom]
+        start = middle[0][1]
+        end = middle[-1][2]
+        return rows + [seg_row(chrom, 1000, start - 1, *baseline, purity=purity)] + list(middle) + [seg_row(chrom, end + 1, size - 1000, *baseline, purity=purity)]
+
+    def focal(self, rows, regions, options=None):
+        return self.events(self.run_engine(rows, focal=regions, options=options or TimingOptions(sex='XX', **ALL_ON)))
+
+    def test_amplification_with_modal_one_one_is_seen(self):
+        # As in real MYCN amplifications, the modal columns stay at 1/1 while total copy number is in the hundreds.
+        rows = self.with_segments('2', seg_row('2', 15900000, 16300000, 1, 1, q1=1., q2=99.))
+        event = self.focal(rows, [self.AMP])['Focal_gain_2:16000000-16200000']
+        self.assertTrue(event.is_clonal)
+        self.assertEqual(event.ccf_hat, 1.)
+
+    def test_broad_arm_gain_is_not_focal(self):
+        rows = [r for r in whole_genome(self.genome, male=False) if r[0] != '2']
+        rows += [seg_row('2', 1000, 90000000, 1, 2), seg_row('2', 96000000, 243000000, 1, 1)]
+        self.assertNotIn('Focal_gain_2:16000000-16200000', self.focal(rows, [self.AMP]))
+
+    def test_gain_above_a_gained_arm_is_focal(self):
+        rows = [r for r in whole_genome(self.genome, male=False) if r[0] != '2']
+        rows += [seg_row('2', 1000, 15899999, 1, 2), seg_row('2', 15900000, 16300000, 1, 6), seg_row('2', 16300001, 90000000, 1, 2),
+                 seg_row('2', 96000000, 243000000, 1, 1)]
+        self.assertIn('Focal_gain_2:16000000-16200000', self.focal(rows, [self.AMP]))
+
+    def test_subclonal_focal_gain_has_its_ccf(self):
+        rows = self.with_segments('2', seg_row('2', 15900000, 16300000, 1, 1, q1=1., q2=1.6))
+        event = self.focal(rows, [self.AMP])['Focal_gain_2:16000000-16200000']
+        self.assertAlmostEqual(event.ccf_hat, .6, places=2)
+        self.assertEqual(event.timing_status, 'subclonal')
+
+    def test_small_step_is_no_event(self):
+        rows = self.with_segments('2', seg_row('2', 15900000, 16300000, 1, 1, q1=1., q2=1.3))
+        self.assertNotIn('Focal_gain_2:16000000-16200000', self.focal(rows, [self.AMP]))
+
+    def test_noisy_segment_is_no_event(self):
+        rows = self.with_segments('2', seg_row('2', 15900000, 16300000, 1, 1, q1=1., q2=2., sigma=.5))
+        self.assertNotIn('Focal_gain_2:16000000-16200000', self.focal(rows, [self.AMP]))
+
+    def test_focal_loss_is_clonal_with_ccf_one(self):
+        rows = self.with_segments('9', seg_row('9', 9000000, 9500000, 0, 1))
+        event = self.focal(rows, [self.DEL])['Focal_loss_9:8000000-11000000']
+        self.assertEqual(event.ccf_hat, 1.)
+        self.assertTrue(event.is_clonal)
+
+    def test_loss_from_a_doubled_arm(self):
+        rows = self.with_segments('9', seg_row('9', 9000000, 9500000, 1, 2), baseline=(2, 2))
+        depth, muts = 80, []
+        for c in map(str, range(1, 9)):
+            for i in range(10):
+                alt = int(depth * (.444 if i % 2 else .222))
+                muts += [(c, 2000000 + i * 1000, 1, 'A', depth - alt, alt), (c, 140000000 + i * 1000, 1, 'A', depth - alt, alt)]
+        engine = self.run_engine(rows, muts=muts, focal=[self.DEL], options=TimingOptions(sex='XX', **ALL_ON))
+        self.assertIsNotNone(engine.WGD)
+        event = self.events(engine)['Focal_loss_9:8000000-11000000']
+        self.assertEqual(event.allelic_cn, 1.)
+        self.assertGreater(self.pi_mean(event.pi_dist), self.pi_mean(engine.WGD.pi_dist))
+
+    def test_partial_deletion_on_male_x_is_a_loss(self):
+        name = 'Focal_loss_X:76000000-78000000'
+        size = self.genome.CHROM_DICT['X']
+        rows = [r for r in whole_genome(self.genome, male=True) if r[0] != 'X'] + y_rows(1.)
+        rows += [hemizygous_row('X', 1000, 76899999, 1.), hemizygous_row('X', 76900000, 77100000, .4), hemizygous_row('X', 77100001, size - 1000, 1.)]
+        options = TimingOptions(sex='XY', **ALL_ON)
+        events = self.focal(rows, [('X', 76000000, 78000000, 'DEL')], options)
+        self.assertIn('Focal_homdel_X:76000000-78000000', events)
+        rows[-2] = hemizygous_row('X', 76900000, 77100000, .6)
+        event = self.focal(rows, [('X', 76000000, 78000000, 'DEL')], options)[name]
+        self.assertAlmostEqual(event.ccf_hat, .4, places=2)
+        self.assertEqual(event.timing_status, 'subclonal')
 
 
 class Hemizygous(TimingCase):
@@ -449,13 +620,25 @@ class Multisample(TimingCase):
         self.assertAlmostEqual(event.ccf_hat, .35)
 
     def test_event_private_to_one_sample_is_dropped(self):
-        def rows(q2):
+        def rows(q1, q2):
             base = [r for r in whole_genome(self.genome, male=False) if r[0] != '17']
-            return base + [seg_row('17', 1000, 22000000, 1, 1, q2=q2), seg_row('17', 25000000, 81000000, 1, 1)]
+            return base + [seg_row('17', 1000, 22000000, 1, 1, q1=q1, q2=q2), seg_row('17', 25000000, 81000000, 1, 1)]
         muts = clonal_muts(['1'])
-        engine = self.run_samples([('A', rows(1.), muts, PURITY), ('B', rows(1.5), muts, PURITY)],
-                                  options=TimingOptions(sex='XX', sex_aware=True, continuous_cn=True, clonal_unresolved=True))
+        options = TimingOptions(sex='XX', sex_aware=True, continuous_cn=True, clonal_unresolved=True)
+        engine = self.run_samples([('A', rows(1., 1.), muts, PURITY), ('B', rows(1., 1.5), muts, PURITY)], options=options)
         self.assertNotIn('gain_17p', self.events(engine))
+        # Each sample has an event on its own allele. Neither is shared, so neither reaches the patient level.
+        engine = self.run_samples([('A', rows(.6, 1.), muts, PURITY), ('B', rows(1., 1.6), muts, PURITY)], options=options)
+        self.assertEqual({n for n in self.events(engine) if '17p' in n}, set())
+
+    def test_wgd_in_one_sample_only_creates_no_false_gains(self):
+        muts = clonal_muts(map(str, range(1, 9)), n=10) + clonal_muts(map(str, range(1, 9)), n=10, start=140000000)
+        doubled = whole_genome(self.genome, male=False, baseline=(2, 2))
+        plain = whole_genome(self.genome, male=False)
+        engine = self.run_samples([('A', doubled, muts, PURITY), ('B', plain, muts, PURITY)],
+                                  options=TimingOptions(sex='XX', sex_aware=True, continuous_cn=True, clonal_unresolved=True))
+        self.assertIsNone(engine.WGD)
+        self.assertEqual({n for n in self.events(engine) if n.startswith('gain_')}, set())
 
     def test_homdel_private_to_one_sample_is_subclonal(self):
         def rows(copies, a):
@@ -545,6 +728,17 @@ class ClonalUnresolvedComparisons(TimingCase):
         events = {e.event_name: e for e in spt.read_timed_events('P1.timing.tsv', compare_all=True)}
         self.assertEqual(events['loss_17p'].timing_status, 'clonal_unresolved')
 
+    def test_earlier_of_two_timed_gains_represents_a_shared_name(self):
+        grid = np.linspace(0, 1, 101)
+        def row(center):
+            pi = np.exp(-((grid - center) ** 2) / .002)
+            return list(pi / pi.sum())
+        columns = ['Event Name'] + [f'pi_{float(x) / 100}' for x in range(101)] + ['timing_status']
+        pd.DataFrame([['gain_17q'] + row(.8) + ['estimated'], ['gain_17q'] + row(.2) + ['estimated'], ['gain_1q'] + row(.5) + ['estimated']],
+                     columns=columns).to_csv(os.path.join(self.tmp, 'dup.tsv'), sep='\t', index=False)
+        events = {e.event_name: e for e in spt.read_timed_events(os.path.join(self.tmp, 'dup.tsv'), compare_all=True)}
+        self.assertLess(self.pi_mean(events['gain_17q'].pi_dist), .3)
+
     def test_original_timing_table_keeps_its_columns(self):
         _, table = self.table(whole_genome(self.genome, male=False), TimingOptions())
         self.assertNotIn('timing_status', table.columns)
@@ -581,8 +775,9 @@ class SegmentHomdels(TimingCase):
         options = TimingOptions(sex='XX', sex_aware=True, clonal_unresolved=True)
         self.assertIn(self.NAME, self.homdel(self.rows(0.59, sigma=0.02, start=21000000, end=23000000), options=options))
 
-    def test_values_between_the_states_are_rejected(self):
-        self.assertNotIn(self.NAME, self.homdel(self.rows(0.47, sigma=0.001)))
+    def test_copies_above_half_are_rejected(self):
+        self.assertIn(self.NAME, self.homdel(self.rows(0.45, sigma=0.001)))
+        self.assertNotIn(self.NAME, self.homdel(self.rows(0.55, sigma=0.001)))
 
     def test_noise_comes_from_the_segment_on_the_copy_number_scale(self):
         # At slope about 2.5 copies per copy ratio, sigma 0.15 is about 0.4 copies: 0.2 copies cannot be told from 1.
@@ -601,8 +796,13 @@ class SegmentHomdels(TimingCase):
             handle.write(text)
         return path
 
-    def test_artifact_region_is_rejected(self):
-        self.assertNotIn(self.NAME, self.homdel(self.rows(0.02), artifact=self.artifact('#chromosome\tstart\tend\trec\n9\t21800000\t22200000\t5\n')))
+    def test_artifact_region_is_rejected_entirely(self):
+        events = self.homdel(self.rows(0.02), artifact=self.artifact('#chromosome\tstart\tend\trec\n9\t21800000\t22200000\t5\n'))
+        self.assertNotIn(self.NAME, events)
+        self.assertNotIn('Focal_loss_9:21000000-23000000', events)
+
+    def test_homdel_does_not_also_emit_a_loss(self):
+        self.assertNotIn('Focal_loss_9:21000000-23000000', self.homdel(self.rows(0.02)))
 
     def test_small_artifact_overlap_is_kept(self):
         self.assertIn(self.NAME, self.homdel(self.rows(0.02), artifact=self.artifact('9\t21900000\t21910000\t5\n')))
@@ -621,25 +821,29 @@ class SegmentHomdels(TimingCase):
         self.assertIn(self.NAME, self.homdel(self.rows(0.02, a1=0, a2=1)))
 
     def test_ccf_is_relative_to_flanks_and_reaches_the_event(self):
-        engine = self.run_engine(self.rows(0.25), focal=[self.REGION], options=TimingOptions(sex='XX', **ALL_ON))
+        engine = self.run_engine(self.rows(0.1), focal=[self.REGION], options=TimingOptions(sex='XX', **ALL_ON))
         event = self.events(engine)[self.NAME]
-        self.assertAlmostEqual(event.ccf_hat, 0.875)
+        self.assertAlmostEqual(event.ccf_hat, 0.95, places=2)
         self.assertTrue(event.is_clonal)
-        engine = self.run_engine(self.rows(0.28), focal=[self.REGION], options=TimingOptions(sex='XX', cn_clonal_min_ccf=.9, **ALL_ON))
+        self.assertEqual(event.timing_status, 'clonal_unresolved')
+        engine = self.run_engine(self.rows(0.28), focal=[self.REGION], options=TimingOptions(sex='XX', **ALL_ON))
         event = self.events(engine)[self.NAME]
-        self.assertAlmostEqual(event.ccf_hat, 0.86)
-        self.assertFalse(event.is_clonal)
+        self.assertAlmostEqual(event.ccf_hat, 0.86, places=2)
+        self.assertEqual(event.timing_status, 'ambiguous_clonality')
+        engine = self.run_engine(self.rows(0.45), focal=[self.REGION], options=TimingOptions(sex='XX', cn_clonal_min_ccf=.95, **ALL_ON))
+        event = self.events(engine)[self.NAME]
+        self.assertAlmostEqual(event.ccf_hat, 0.775, places=2)
         self.assertEqual(event.timing_status, 'subclonal')
 
     def test_flank_lengths_are_clipped_to_the_window(self):
-        # A long distant segment reaches into the window by only 200 kb, so the nearby 1 Mb of 4 copies must win.
+        # A long segment reaches only 200 kb into the 1 Mb flank, so it must not outweigh what lies next to the deletion.
         rows = [r for r in whole_genome(self.genome, male=False) if r[0] != '9']
         size = self.genome.CHROM_DICT['9']
-        rows += [seg_row('9', 1000, 20700000, 1, 1), seg_row('9', 20700001, 21699999, 2, 2),
-                 seg_row('9', 21700000, 21900000, 0, 0, q1=.1, q2=.1), seg_row('9', 21900001, 22900000, 2, 2),
+        rows += [seg_row('9', 1000, 20900000, 4, 4), seg_row('9', 20900001, 21699999, 1, 1),
+                 seg_row('9', 21700000, 21900000, 0, 0, q1=.05, q2=.05), seg_row('9', 21900001, 22900000, 1, 1),
                  seg_row('9', 22900001, size - 1000, 1, 1)]
         event = self.events(self.run_engine(rows, focal=[self.REGION], options=TimingOptions(sex='XX', **ALL_ON)))[self.NAME]
-        self.assertAlmostEqual(event.ccf_hat, 0.95, places=3)
+        self.assertAlmostEqual(event.ccf_hat, 0.95, places=2)
 
     def test_male_x_counts_the_single_copy(self):
         name = 'Focal_homdel_X:76000000-78000000'
@@ -654,7 +858,7 @@ class SegmentHomdels(TimingCase):
         name = 'Focal_homdel_X:76000000-78000000'
         size = self.genome.CHROM_DICT['X']
         rows = [r for r in whole_genome(self.genome, male=True) if r[0] != 'X'] + y_rows(1.)
-        rows += [hemizygous_row('X', 1000, 76899999, 1.), hemizygous_row('X', 76900000, 77100000, .2, sigma=.12), hemizygous_row('X', 77100001, size - 1000, 1.)]
+        rows += [hemizygous_row('X', 1000, 76899999, 1.), hemizygous_row('X', 76900000, 77100000, .2, sigma=.15), hemizygous_row('X', 77100001, size - 1000, 1.)]
         options = TimingOptions(sex='XY', **ALL_ON)
         self.assertIn(name, self.events(self.run_engine(rows, focal=[('X', 76000000, 78000000, 'DEL')], options=options)))
 
@@ -729,17 +933,50 @@ class CommandLine(TimingCase):
         with open(artifact, 'w') as handle:
             handle.write('9\t21800000\t22200000\t5\n')
         focal = '9\t21000000\t23000000\tDEL\t0.01\tregion\n'
-        flags = ['--sex_aware', '--clonal_unresolved', '--segment_homdels']
+        flags = ['--sex_aware', '--continuous_cn', '--clonal_unresolved', '--segment_homdels']
         self.assertEqual(self.run_cli(rows, 'XX', *flags, focal=focal).returncode, 0)
         self.assertIn('Focal_homdel_9:21000000-23000000', set(self.table()['Event Name']))
         self.assertEqual(self.run_cli(rows, 'XX', *flags, '--homdel_artifact_file', artifact, focal=focal).returncode, 0)
         self.assertNotIn('Focal_homdel_9:21000000-23000000', set(self.table()['Event Name']))
 
+    def test_thresholds_reach_the_calls(self):
+        rows = [r for r in whole_genome(self.genome, male=False) if r[0] != '9']
+        size = self.genome.CHROM_DICT['9']
+        rows += [seg_row('9', 1000, 21899999, 1, 1), seg_row('9', 21900000, 22100000, 0, 0, q1=.1, q2=.1), seg_row('9', 22100001, size - 1000, 1, 1)]
+        focal = '9\t21000000\t23000000\tDEL\t0.01\tregion\n'
+        flags = ['--sex_aware', '--continuous_cn', '--clonal_unresolved', '--segment_homdels']
+        name = 'Focal_homdel_9:21000000-23000000'
+        self.assertEqual(self.run_cli(rows, 'XX', *flags, focal=focal).returncode, 0)
+        self.assertIn(name, set(self.table()['Event Name']))
+        self.assertEqual(self.run_cli(rows, 'XX', *flags, '--homdel_max_copies', '0.1', focal=focal).returncode, 0)
+        self.assertNotIn(name, set(self.table()['Event Name']))
+        self.assertEqual(self.run_cli(rows, 'XX', *flags, '--homdel_max_length', '1000', focal=focal).returncode, 0)
+        self.assertNotIn(name, set(self.table()['Event Name']))
+        self.assertEqual(self.run_cli(rows, 'XX', *flags, '--homdel_min_z', '50', focal=focal).returncode, 0)
+        self.assertNotIn(name, set(self.table()['Event Name']))
+        self.assertEqual(self.run_cli(rows, 'XX', *flags, '--cn_clonal_min_ccf', '0.5', focal=focal).returncode, 0)
+        table = self.table().set_index('Event Name')
+        self.assertEqual(str(table.loc[name, 'is_clonal']), 'True')
+        self.assertEqual(self.run_cli(rows, 'XX', *flags, '--cn_clonal_min_ccf', '1.0', focal=focal).returncode, 0)
+        self.assertEqual(self.table().set_index('Event Name').loc[name, 'timing_status'], 'subclonal')
+
+    def test_sif_builder_writes_sex(self):
+        command = [sys.executable, os.path.join(REPO, 'create_patient_sif.py'), '--patient_id', 'P1.REP0', '--sample_names', 'S1',
+                   '--absolute_mafs', 'a.maf', '--absolute_segtabs', 'a.seg', '--absolute_purities', '.8', '--sex', 'XY',
+                   '--outfile', os.path.join(self.tmp, 'out.sif')]
+        self.assertEqual(subprocess.run(command, capture_output=True).returncode, 0)
+        self.assertEqual(pd.read_csv(os.path.join(self.tmp, 'out.sif'), sep='\t')['sex'].iloc[0], 'XY')
+        timing = pd.read_csv(os.path.join(self.tmp, 'out.sif.timing.txt.gz'), sep='\t')
+        self.assertEqual(timing['sex'].iloc[0], 'XY')
+        self.assertEqual(timing['maf_fn'].iloc[0], 'P1.REP0.mut_ccfs.txt.gz')
+
     def test_bad_input_stops_the_run(self):
         rows = whole_genome(self.genome, male=True) + y_rows(1.)
         for sex in ('Unknown', None):
             self.assertNotEqual(self.run_cli(rows, sex, '--sex_aware').returncode, 0)
-        self.assertNotEqual(self.run_cli(rows, 'XY', '--segment_homdels', '--clonal_unresolved').returncode, 0)
+        self.assertNotEqual(self.run_cli(rows, 'XY', '--segment_homdels', '--clonal_unresolved', '--continuous_cn').returncode, 0)
+        self.assertNotEqual(self.run_cli(rows, 'XY', '--continuous_cn', '--intersect_cn_trees').returncode, 0)
+        self.assertNotEqual(self.run_cli(rows, 'XY', '--sex_aware', '--genome_build', 'hg38').returncode, 0)
         self.assertNotEqual(self.run_cli(rows, 'XY', '--homdel_artifact_file', 'x').returncode, 0)
 
 

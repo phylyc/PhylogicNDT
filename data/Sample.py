@@ -445,6 +445,46 @@ class TumorSample:
         else:
             self._mut_varstring_hashtable[muts.var_str] = muts
 
+    def copy_ratio_line(self):
+        """(slope, intercept) with total copy number = slope * copy ratio + intercept, from the autosomal segments.
+
+        All of them lie on this line, which holds purity and ploidy: the slope is 1 / delta and the intercept -b / delta.
+        """
+        if not hasattr(self, '_copy_ratio_line'):
+            points = [(iv.data[1].get('copy_ratio'), iv.data[1].get('total_cn_cont'))
+                      for chrom, tree in self.CnProfile.items() if str(chrom).replace('chr', '') not in ('X', 'Y') for iv in tree]
+            points = np.array([p for p in points if p[0] is not None and p[1] is not None], dtype=float)
+            if len(points) < 2 or np.ptp(points[:, 0]) == 0:
+                self._copy_ratio_line = (np.nan, np.nan)
+            else:
+                slope, intercept = np.polyfit(points[:, 0], points[:, 1], 1)
+                self._copy_ratio_line = (float(slope), float(intercept))
+        return self._copy_ratio_line
+
+    def allele_copy_number(self, data):
+        """Continuous allelic copy number of a segment, as (a1, a2).
+
+        It comes from the homolog-specific copy ratio: q = (hscr - b) / (2 * delta). The rescaled.cn columns sit on the
+        modal integer unless ABSOLUTE flags a segment, so they cannot show subclonal states, and serve only where hscr is
+        absent. Where ACEseq saw no imbalance both alleles share half of the total, which would turn one subclonal event
+        into two of half the CCF, so the deviation goes to one allele.
+        """
+        slope, intercept = self.copy_ratio_line()
+        values = []
+        for allele in ('a1', 'a2'):
+            hscr = data.get('hscr_' + allele)
+            if hscr is not None and np.isfinite(slope):
+                values.append((hscr * slope + intercept) / 2.)
+            else:
+                rescaled = data.get('rescaled_' + allele)
+                values.append(float('nan') if rescaled is None else rescaled)
+        a1, a2 = values
+        if a1 == a1 and a2 == a2 and abs(a1 - a2) < .02:
+            half = (a1 + a2) / 2.
+            offset = abs(half - round(half))
+            a1, a2 = half - offset, half + offset
+        return a1, a2
+
     def _resolve_CnEvents(self, seg_file, input_type='auto', purity=1, ploidy=2, chroms=tuple(list(map(str, range(1, 23))) + ['X', 'Y'])):
         if input_type == 'auto':
             if not seg_file:

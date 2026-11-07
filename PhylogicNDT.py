@@ -481,20 +481,25 @@ def build_parser():
                                dest='homdel_max_length',
                                default=5000000,
                                help='Longest segment accepted as a homozygous deletion, in bp.')
-    timing_parent.add_argument('--homdel_min_posterior',
+    timing_parent.add_argument('--homdel_max_copies',
                                type=float,
                                action='store',
-                               dest='homdel_min_posterior',
-                               default=0.95,
-                               help='Minimum posterior of copy number 0 against copy number 1 for a homozygous deletion.')
+                               dest='homdel_max_copies',
+                               default=0.5,
+                               help='Most copies left in a homozygous deletion. c copies mean that at least 1 - c of the cells have none.')
+    timing_parent.add_argument('--homdel_min_z',
+                               type=float,
+                               action='store',
+                               dest='homdel_min_z',
+                               default=3.,
+                               help='Standard deviations a homozygous deletion must lie below one copy.')
     timing_parent.add_argument('--cn_clonal_min_ccf',
                                type=float,
                                action='store',
                                dest='cn_clonal_min_ccf',
                                default=0.8,
                                help='With --continuous_cn, and for chrY with --sex_aware: copy-number events below this CCF '
-                                    'are subclonal, and events too close to it to tell stay unknown. '
-                                    'With --clonal_unresolved it applies to focal events too.')
+                                    'are subclonal, above it clonal, and too close to it to tell they stay unknown.')
 
     timing = subparsers.add_parser("Timing", help="Time somatic events in one or multiple samples.",
                                    parents=[base_parser, timing_parent])

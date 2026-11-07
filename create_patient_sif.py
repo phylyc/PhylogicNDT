@@ -12,6 +12,7 @@ def main():
     parser.add_argument("--absolute_purities", nargs="+", required=True, type=float)
     parser.add_argument("--timepoints", nargs='*', type=int, required=False, help="Optional explicit timepoint ordering (one per sample)")
     parser.add_argument("--tumor_mutation_burdens", nargs='*', type=float, required=False, help="Optional tumor mutation burdens (one per sample)")
+    parser.add_argument("--sex", required=False, help="Optional patient sex, written as a column for Timing --sex_aware.")
     parser.add_argument("--outfile", required=True)
     args = parser.parse_args()
 
@@ -44,17 +45,21 @@ def main():
         "timepoint": timepoints,
         "tmb": tmb
     })
+    if args.sex:
+        df["sex"] = args.sex
     df.to_csv(args.outfile, sep="\t", index=False)
 
     # SIF for timing of mutations in patient based on clustering results
     df = pd.DataFrame({
         "sample_id": sample_ids,
-        "maf_fn": [f"{args.patient_id}.mut_ccfs.txt"] * n,
+        "maf_fn": [f"{args.patient_id}.mut_ccfs.txt.gz"] * n,
         "seg_fn": seg_fns,
         "purity": purities,
         "timepoint": timepoints,
         "tmb": tmb
     })
+    if args.sex:
+        df["sex"] = args.sex
     df.to_csv(args.outfile + ".timing.txt.gz", sep="\t", index=False)
 
 

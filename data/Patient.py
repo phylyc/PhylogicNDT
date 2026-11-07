@@ -580,28 +580,19 @@ class Patient:
                 reach = e
         return covered >= .5 * (end - start)
 
-    @staticmethod
-    def _copies_per_copy_ratio(sample):
-        """Copy-number units per copy-ratio unit, read off the sample's autosomal segments, which lie on one line."""
-        if not hasattr(sample, '_copies_per_copy_ratio'):
-            points = [(iv.data[1].get('copy_ratio'), iv.data[1].get('total_cn_cont'))
-                      for chrom, tree in sample.CnProfile.items() if chrom not in ('X', 'Y') for iv in tree]
-            points = np.array([p for p in points if p[0] is not None and p[1] is not None])
-            sample._copies_per_copy_ratio = np.polyfit(points[:, 0], points[:, 1], 1)[0] if len(points) >= 2 else np.nan
-        return sample._copies_per_copy_ratio
-
-    def _segment_homdel_call(self, sample, chrom, start, end, artifacts, max_length, min_posterior, min_probes=5,
-                             min_overlap=1000, flank_bp=1000000, min_sd=0.1, max_copies=0.3):
+    def _segment_homdel_call(self, sample, chrom, start, end, artifacts, max_length, max_copies, min_z, min_probes=5,
+                             min_overlap=1000, flank_bp=1000000, min_sd=0.1):
         """
-        Homozygous deletion in [start, end): one segment whose copy number is near 0 and closer to 0 than to 1, given
-        its noise. Comparing 0 with 1 alone is not enough, since a value between them fits neither.
+        Homozygous deletion in [start, end): one segment with so few copies that most tumor cells must hold none.
 
-        The modal state of a whole window cannot do this: windows are megabases long, and modal 0/0 can come from
-        rounding at low purity. CCF is the depth of the drop relative to the copy number flanking the segment.
-        Returns (ccf_hat, ccf_high, ccf_low) of the best-supported segment, or None if no segment qualifies.
+        With at most one copy left per cell, c copies mean that at least 1 - c of the cells have none. So max_copies 0.5
+        asks for a majority of cells, the same rule as LoY at CCF above 50%. The value must also lie clearly below one
+        copy given the segment's noise. The modal state of a whole window cannot do this: windows are megabases long, and
+        modal 0/0 can come from rounding at low purity. CCF is the depth of the drop relative to the copy number flanking
+        the segment. Returns (ccf_hat, ccf_high, ccf_low) of the deepest segment, or None if no segment qualifies.
         """
         tree = sample.CnProfile[chrom]
-        slope = self._copies_per_copy_ratio(sample)
+        slope = sample.copy_ratio_line()[0]
         if chrom in self.hemizygous_chroms:
             slope = slope / 2.  # one copy changes the copy ratio twice as much on a hemizygous chromosome
         best = None
@@ -617,9 +608,7 @@ class Patient:
             sd = (seg.get('seg_sigma') or 0.) * slope
             sd = max(sd, min_sd) if np.isfinite(sd) else min_sd
             copies = max(copies, 0.)
-            log_odds = ((copies - 1.) ** 2 - copies ** 2) / (2. * sd ** 2)  # copy number 0 against copy number 1
-            posterior = 1. / (1. + np.exp(-np.clip(log_odds, -700, 700)))
-            if posterior < min_posterior or (best is not None and posterior <= best[0]):
+            if (1. - copies) / sd < min_z or (best is not None and copies >= best[0]):
                 continue
             flanks = [(other.data[1].get('total_cn_cont'),
                        min(other.end, iv.end + flank_bp) - max(other.begin, iv.begin - flank_bp))
@@ -632,10 +621,73 @@ class Patient:
                 flank_cn = max(next(value for value, cumulative in zip(
                     (v for v, _ in order), itertools.accumulate(length for _, length in order)) if cumulative >= halfway), 1.)
             ccf = lambda value: float(np.clip(1. - max(value, 0.) / flank_cn, 0., 1.))
-            best = (posterior, ccf(copies), ccf(copies - 1.96 * sd), ccf(copies + 1.96 * sd))
+            best = (copies, ccf(copies), ccf(copies - 1.96 * sd), ccf(copies + 1.96 * sd))
         return None if best is None else best[1:]
 
-    def add_focal_cn_events(self, focal_regions, qval_max=None, focal_max_arm_frac=0.3, min_bp_overlap=1000, padding=100000, require_directional_consistency=False, split_across_centromere=True, segment_homdels=None):
+    def _continuous_focal_call(self, sample, chrom, start, end, arm_start, arm_end, kind, artifacts, min_overlap, min_step=.5,
+                               min_z=3., min_sd=.1, cn_tol=.2):
+        """
+        A focal gain or loss in [start, end): the most extreme segment in the window, against the rest of its arm.
+
+        Being measured from the arm is what makes an event focal: a broad gain across the window is the arm's event. The
+        modal columns and cancer.cell.frac cannot show this, since modal states stay near 1/1 at high amplification and
+        the fraction is the distance to the nearest integer for gains. Returns None, or a dict with the allele that moved
+        most, its CCF, and the integer state reached.
+        """
+        tree = sample.CnProfile[chrom]
+        hemizygous = chrom in self.hemizygous_chroms
+        window = []
+        for iv in tree.overlap(start, end):
+            if min(iv.end, end) - max(iv.begin, start) < min_overlap or iv.data[1].get('total_cn_cont') is None:
+                continue
+            if kind == 'DEL' and self._in_artifact(iv.begin, iv.end, artifacts.get(chrom, ())):
+                continue
+            window.append(iv)
+        if not window:
+            return None
+        pick = max if kind == 'AMP' else min
+        seg = pick(window, key=lambda iv: iv.data[1]['total_cn_cont'])
+        rows = [(iv.data[1].get('total_cn_cont'), sample.allele_copy_number(iv.data[1]),
+                 min(iv.end, arm_end) - max(iv.begin, arm_start)) for iv in tree.overlap(arm_start, arm_end) if iv != seg]
+        rows = [row for row in rows if row[0] is not None and row[2] > 0]
+        if not rows:
+            return None
+
+        def arm_value(pairs):
+            values = np.array([v for v, _ in pairs], dtype=float)
+            weights = np.array([w for _, w in pairs], dtype=float)
+            keep = np.isfinite(values)
+            if not keep.any():
+                return np.nan
+            values, weights = values[keep], weights[keep]
+            order = np.argsort(values)
+            return float(values[order][np.searchsorted(np.cumsum(weights[order]), .5 * weights.sum())])
+
+        arm_total = arm_value([(r[0], r[2]) for r in rows])
+        arm_a1 = arm_value([(r[1][0], r[2]) for r in rows])
+        arm_a2 = arm_value([(r[1][1], r[2]) for r in rows])
+        step = seg.data[1]['total_cn_cont'] - arm_total
+        if (kind == 'AMP') != (step > 0):
+            return None
+        slope = sample.copy_ratio_line()[0] / (2. if hemizygous else 1.)
+        sd = (seg.data[1].get('seg_sigma') or 0.) * slope
+        sd = max(sd, min_sd) if np.isfinite(sd) else min_sd
+        # One allele has half the room to move, so a step counts from half the size.
+        if abs(step) < (min_step / 2. if hemizygous else min_step) or abs(step) / sd < min_z:
+            return None
+        a1, a2 = sample.allele_copy_number(seg.data[1])
+        delta1, delta2 = a1 - arm_a1, a2 - arm_a2
+        use_a1 = not hemizygous and abs(np.nan_to_num(delta1)) > abs(np.nan_to_num(delta2))
+        delta = delta1 if use_a1 else delta2
+        if not np.isfinite(delta) or abs(delta) < cn_tol or (delta > 0) != (kind == 'AMP'):
+            return None
+        reached = (lambda q: float(np.ceil(q - cn_tol))) if kind == 'AMP' else (lambda q: max(float(np.floor(q + cn_tol)), 0.))
+        pair = (reached(a1), float(round(a2))) if use_a1 else (0. if hemizygous else float(round(a1)), reached(a2))
+        if hemizygous and kind == 'DEL' and a2 >= cn_tol:
+            pair = (0., float(a2))  # cells still hold the one allele, so this must not read as nothing left
+        return {'a1': use_a1, 'ccf': float(min(abs(delta), 1.)), 'cn': pair[0] if use_a1 else pair[1], 'pair': pair}
+
+    def add_focal_cn_events(self, focal_regions, qval_max=None, focal_max_arm_frac=0.3, min_bp_overlap=1000, padding=100000, require_directional_consistency=False, split_across_centromere=True, segment_homdels=None, continuous=False):
         """
         Add focal CNV events (e.g., from GISTIC2 peaks) as CopyNumberEvents.
 
@@ -652,8 +704,9 @@ class Patient:
             require_directional_consistency: if True, for each sample+allele, if overlapping segments
                 include both gains and losses (relative to CN=1), treat that sample/allele as neutral for this focal.
             split_across_centromere: if True, split windows crossing the centromere into p and q parts; otherwise skip.
-            segment_homdels: None keeps the window-mode homdel definition. A dict with artifact_file, max_length and
-                min_posterior calls homdels per segment instead, see _segment_homdel_call.
+            segment_homdels: None keeps the window-mode homdel definition. A dict with artifact_file, max_length,
+                max_copies and min_z calls homdels per segment instead, see _segment_homdel_call.
+            continuous: call focal gains and losses from continuous copy number against the arm, see _continuous_focal_call.
         """
         homdel_artifacts = self._read_homdel_artifacts(segment_homdels['artifact_file']) if segment_homdels else {}
 
@@ -806,6 +859,40 @@ class Patient:
                         continue
 
                     bands = self.get_bands(chrom, s0, e0)
+
+                    if continuous:
+                        n_samp = len(self.sample_list)
+                        is_deletion = R.get('type') in ('DEL', 'DELETION', None)
+                        calls = [None] * n_samp
+                        if segment_homdels is not None and is_deletion:
+                            calls = [self._segment_homdel_call(sample, chrom, s0, e0, homdel_artifacts, segment_homdels['max_length'],
+                                                               segment_homdels['max_copies'], segment_homdels['min_z'])
+                                     if sample.CnProfile else None for sample in self.sample_list]
+                            if any(call is not None for call in calls):
+                                none = (0., 0., 0.)
+                                self._add_cn_event_to_samples(chrom=chrom, start=s0, end=e0, arm=arm_lbl,
+                                                              cns=tuple(1 if call is None else 0 for call in calls),
+                                                              cn_category='Focal_homdel',
+                                                              ccf_hat=tuple((call or none)[0] for call in calls),
+                                                              ccf_high=tuple((call or none)[1] for call in calls),
+                                                              ccf_low=tuple((call or none)[2] for call in calls),
+                                                              a1=True, dupe=False)
+                        kind = 'DEL' if is_deletion else 'AMP'
+                        arm_start, arm_end = (0, centromere) if arm_lbl == 'p' else (centromere, csize)
+                        focal = [None if calls[i] is not None or not sample.CnProfile else
+                                 self._continuous_focal_call(sample, chrom, s0, e0, arm_start, arm_end, kind, homdel_artifacts, min_bp_overlap)
+                                 for i, sample in enumerate(self.sample_list)]
+                        carriers = [call for call in focal if call is not None]
+                        if carriers:
+                            is_a1 = carriers[0]['a1']
+                            ccfs = tuple(0. if call is None else call['ccf'] for call in focal)
+                            self._add_cn_event_to_samples(chrom=chrom, start=s0, end=e0, arm=arm_lbl,
+                                                          cns=tuple(1 if call is None else call['cn'] for call in focal),
+                                                          cn_category='Focal_gain' if kind == 'AMP' else 'Focal_loss',
+                                                          ccf_hat=ccfs, ccf_high=ccfs, ccf_low=ccfs, a1=is_a1,
+                                                          dupe=(kind == 'AMP') != is_a1,
+                                                          state_pairs=tuple(None if call is None else call['pair'] for call in focal))
+                        continue
 
                     # summarize per-allele across samples
                     results = {}
@@ -1023,18 +1110,21 @@ class Patient:
                             continue
                         self._add_cn_event_to_samples(chrom, min(clique_bands), max(clique_bands), clique_arm, local_cn, cn_category, clique_ccf_hat, clique_ccf_high, clique_ccf_low, a1=clique_allele == "a1")
 
-    def _add_cn_event_to_samples(self, chrom, start, end, arm, cns, cn_category, ccf_hat, ccf_high, ccf_low, a1=True, dupe=False):
+    def _add_cn_event_to_samples(self, chrom, start, end, arm, cns, cn_category, ccf_hat, ccf_high, ccf_low, a1=True, dupe=False, state_pairs=None):
         """
         Adds CN event to sample in low_coverage_mutations attr and mut hashtable
 
         """
         for i, sample in enumerate(self.sample_list):
             local_cn = cns[i]
-            ccf_hat_i = ccf_hat[i] if local_cn != 1. else 0.
-            ccf_high_i = ccf_high[i] if local_cn != 1. else 0.
-            ccf_low_i = ccf_low[i] if local_cn != 1. else 0.
+            # With a state given, one copy can itself be an event: a step down from two copies on the arm.
+            carries = local_cn != 1. if state_pairs is None else state_pairs[i] is not None
+            ccf_hat_i = ccf_hat[i] if carries else 0.
+            ccf_high_i = ccf_high[i] if carries else 0.
+            ccf_low_i = ccf_low[i] if carries else 0.
             cn = CopyNumberEvent(chrom, cn_category, start=start, end=end, ccf_hat=ccf_hat_i, ccf_high=ccf_high_i, ccf_low=ccf_low_i,
                                  local_cn=local_cn, from_sample=sample, arm=arm, a1=a1, dupe=dupe)
+            cn.state_pair = None if state_pairs is None else state_pairs[i]
             sample.low_coverage_mutations.update({cn.var_str: cn})
             sample.add_muts_to_hashtable(cn)
 

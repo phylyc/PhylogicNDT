@@ -10,6 +10,7 @@ from output.PhylogicOutput import PhylogicOutput
 
 TimedEvent = namedtuple('TimedEvent', ['event_name', 'pi_dist', 'timing_status'], defaults=(None,))
 # Which row to keep when alleles share an event name. Only tables written with the new options have statuses.
+PI_GRID = np.linspace(0, 1, 101)
 STATUS_RANK = {'subclonal': 1, 'ambiguous_clonality': 2, 'clonal_unresolved': 3, 'prior_only': 4, 'estimated': 5}
 
 
@@ -61,8 +62,10 @@ def run_tool(args):
 
     if args.sex_aware and args.genome_build != 'hg19':
         raise ValueError('--sex_aware defines callable chrY for hg19 only.')
-    if args.segment_homdels and not (args.gistic_fn and args.clonal_unresolved):
-        raise ValueError('--segment_homdels needs --cn_peaks, and --clonal_unresolved to time what it calls.')
+    if args.segment_homdels and not (args.gistic_fn and args.clonal_unresolved and args.continuous_cn):
+        raise ValueError('--segment_homdels needs --cn_peaks, --continuous_cn, and --clonal_unresolved to time what it calls.')
+    if args.intersect_cn_trees and (args.sex_aware or args.continuous_cn or args.clonal_unresolved or args.segment_homdels):
+        raise ValueError('--intersect_cn_trees does not use the new timing options.')
     if args.homdel_artifact_file and not args.segment_homdels:
         raise ValueError('--homdel_artifact_file has no effect without --segment_homdels.')
     options = TimingEngine.TimingOptions(sex=sex, sex_aware=args.sex_aware, continuous_cn=args.continuous_cn,
@@ -78,8 +81,9 @@ def run_tool(args):
             segment_homdels = None
             if args.segment_homdels:
                 segment_homdels = dict(artifact_file=args.homdel_artifact_file, max_length=args.homdel_max_length,
-                                       min_posterior=args.homdel_min_posterior)
-            patient_data.add_focal_cn_events(focal_regions=args.gistic_fn, segment_homdels=segment_homdels)
+                                       max_copies=args.homdel_max_copies, min_z=args.homdel_min_z)
+            patient_data.add_focal_cn_events(focal_regions=args.gistic_fn, segment_homdels=segment_homdels,
+                                             continuous=args.continuous_cn)
     patient_data.preprocess_samples()
     if args.min_supporting_muts < 1:
         raise ValueError('Invalid value for min_supporting_muts')
@@ -145,7 +149,10 @@ def read_timed_events(timing_tsv, event_file=None, compare_all=False):
         if event_name in timing_by_event:
             duplicate_event_counts[event_name] = duplicate_event_counts.get(event_name, 1) + 1
             prev_pi_dist, prev_event_class, prev_status = timing_by_event[event_name]
-            if STATUS_RANK.get(status, 0) > STATUS_RANK.get(prev_status, 0):
+            rank, prev_rank = STATUS_RANK.get(status, 0), STATUS_RANK.get(prev_status, 0)
+            earlier = (rank == prev_rank > 0 and pi_dist is not None and prev_pi_dist is not None
+                       and float(np.dot(pi_dist, PI_GRID)) < float(np.dot(prev_pi_dist, PI_GRID)))
+            if rank > prev_rank or earlier:
                 # Two alleles can share a name. The event happened no later than its earliest step.
                 timing_by_event[event_name] = (pi_dist, event_class or prev_event_class, status)
             elif prev_pi_dist is None and pi_dist is not None and prev_status is None:
