@@ -625,20 +625,23 @@ class Patient:
         return None if best is None else best[1:]
 
     def _continuous_focal_call(self, sample, chrom, start, end, arm_start, arm_end, kind, artifacts, min_overlap, min_step=.5,
-                               min_z=3., min_sd=.1, cn_tol=.2):
+                               min_z=3., min_sd=.1, cn_tol=.2, flank_bp=2000000, max_arm_fraction=.3, min_probes=5, high_level_step=4.):
         """
-        A focal gain or loss in [start, end): the most extreme segment in the window, against the rest of its arm.
+        A focal gain or loss in [start, end): the most extreme segment in the window, against what lies on either side.
 
-        Being measured from the arm is what makes an event focal: a broad gain across the window is the arm's event. The
-        modal columns and cancer.cell.frac cannot show this, since modal states stay near 1/1 at high amplification and
-        the fraction is the distance to the nearest integer for gains. Returns None, or a dict with the allele that moved
-        most, its CCF, and the integer state reached.
+        A focal event must stand out from both flanks. Against the arm alone, a normal segment next to a partial arm loss
+        would read as gained, as CCND1 does beside a distal 11q deletion. High amplification is the exception: an amplicon
+        can fill its own flanks, so a gain this far above the arm counts as well. The modal columns and cancer.cell.frac
+        cannot show any of this, since modal states stay near 1/1 at high amplification and the fraction is the distance to
+        the nearest integer for gains. Returns None, or a dict with the allele that moved most, its CCF and the state reached.
         """
         tree = sample.CnProfile[chrom]
         hemizygous = chrom in self.hemizygous_chroms
         window = []
         for iv in tree.overlap(start, end):
             if min(iv.end, end) - max(iv.begin, start) < min_overlap or iv.data[1].get('total_cn_cont') is None:
+                continue
+            if (iv.data[1].get('n_probes') or 0) < min_probes or iv.length() > max_arm_fraction * (arm_end - arm_start):
                 continue
             if kind == 'DEL' and self._in_artifact(iv.begin, iv.end, artifacts.get(chrom, ())):
                 continue
@@ -647,26 +650,33 @@ class Patient:
             return None
         pick = max if kind == 'AMP' else min
         seg = pick(window, key=lambda iv: iv.data[1]['total_cn_cont'])
-        rows = [(iv.data[1].get('total_cn_cont'), sample.allele_copy_number(iv.data[1]),
-                 min(iv.end, arm_end) - max(iv.begin, arm_start)) for iv in tree.overlap(arm_start, arm_end) if iv != seg]
-        rows = [row for row in rows if row[0] is not None and row[2] > 0]
-        if not rows:
+
+        def weighted_median(pairs):
+            pairs = [(v, w) for v, w in pairs if v == v and w > 0]
+            if not pairs:
+                return float('nan')
+            values, weights = (np.array(x, dtype=float) for x in zip(*sorted(pairs)))
+            return float(values[np.searchsorted(np.cumsum(weights), .5 * weights.sum())])
+
+        def side(lo, hi):
+            """Length-weighted medians of (total, a1, a2) over one flank, inside the arm."""
+            lo, hi = max(lo, arm_start), min(hi, arm_end)
+            rows = [] if hi <= lo else [(iv.data[1].get('total_cn_cont'), sample.allele_copy_number(iv.data[1]), min(iv.end, hi) - max(iv.begin, lo))
+                                        for iv in tree.overlap(lo, hi) if iv != seg]
+            rows = [row for row in rows if row[0] is not None]
+            return (weighted_median([(r[0], r[2]) for r in rows]), weighted_median([(r[1][0], r[2]) for r in rows]),
+                    weighted_median([(r[1][1], r[2]) for r in rows]))
+
+        flanks = [flank for flank in (side(seg.begin - flank_bp, seg.begin), side(seg.end, seg.end + flank_bp)) if flank[0] == flank[0]]
+        if not flanks:
             return None
-
-        def arm_value(pairs):
-            values = np.array([v for v, _ in pairs], dtype=float)
-            weights = np.array([w for _, w in pairs], dtype=float)
-            keep = np.isfinite(values)
-            if not keep.any():
-                return np.nan
-            values, weights = values[keep], weights[keep]
-            order = np.argsort(values)
-            return float(values[order][np.searchsorted(np.cumsum(weights[order]), .5 * weights.sum())])
-
-        arm_total = arm_value([(r[0], r[2]) for r in rows])
-        arm_a1 = arm_value([(r[1][0], r[2]) for r in rows])
-        arm_a2 = arm_value([(r[1][1], r[2]) for r in rows])
-        step = seg.data[1]['total_cn_cont'] - arm_total
+        # The event must clear both sides: the higher flank for a gain and the lower one for a loss.
+        flank = max(flanks, key=lambda f: f[0]) if kind == 'AMP' else min(flanks, key=lambda f: f[0])
+        if kind == 'AMP':
+            arm = side(arm_start, arm_end)
+            if seg.data[1]['total_cn_cont'] - arm[0] >= high_level_step:
+                flank = arm
+        step = seg.data[1]['total_cn_cont'] - flank[0]
         if (kind == 'AMP') != (step > 0):
             return None
         slope = sample.copy_ratio_line()[0] / (2. if hemizygous else 1.)
@@ -676,7 +686,7 @@ class Patient:
         if abs(step) < (min_step / 2. if hemizygous else min_step) or abs(step) / sd < min_z:
             return None
         a1, a2 = sample.allele_copy_number(seg.data[1])
-        delta1, delta2 = a1 - arm_a1, a2 - arm_a2
+        delta1, delta2 = a1 - flank[1], a2 - flank[2]
         use_a1 = not hemizygous and abs(np.nan_to_num(delta1)) > abs(np.nan_to_num(delta2))
         delta = delta1 if use_a1 else delta2
         if not np.isfinite(delta) or abs(delta) < cn_tol or (delta > 0) != (kind == 'AMP'):

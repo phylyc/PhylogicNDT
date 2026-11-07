@@ -540,6 +540,25 @@ class FocalEvents(TimingCase):
                  seg_row('2', 96000000, 243000000, 1, 1)]
         self.assertIn('Focal_gain_2:16000000-16200000', self.focal(rows, [self.AMP]))
 
+    def test_normal_segment_beside_a_partial_arm_loss_is_not_a_gain(self):
+        # As for CCND1 beside a distal 11q deletion: the arm median is low, but the window matches its near flank.
+        rows = [r for r in whole_genome(self.genome, male=False) if r[0] != '11']
+        size = self.genome.CHROM_DICT['11']
+        rows += [seg_row('11', 1000, 50000000, 1, 1), seg_row('11', 54000000, 69000000, 1, 1), seg_row('11', 69000001, 69500000, 1, 1),
+                 seg_row('11', 69500001, 72000000, 1, 1), seg_row('11', 72000001, size - 1000, 0, 1)]
+        self.assertNotIn('Focal_gain_11:69455855-69469242', self.focal(rows, [('11', 69455855, 69469242, 'AMP')]))
+
+    def test_amplicon_of_several_segments_is_measured_from_the_baseline(self):
+        rows = self.with_segments('2', seg_row('2', 15900000, 16000000, 1, 1, q1=1., q2=39.), seg_row('2', 16000001, 16200000, 1, 1, q1=1., q2=99.),
+                                  seg_row('2', 16200001, 16300000, 1, 1, q1=1., q2=59.))
+        self.assertEqual(self.focal(rows, [self.AMP])['Focal_gain_2:16000000-16200000'].ccf_hat, 1.)
+
+    def test_amplicon_that_fills_its_flanks_is_still_seen(self):
+        # The amplicon spans most of 4 Mb, so the flank medians are amplified too. It stands out from the arm instead.
+        rows = self.with_segments('2', *[seg_row('2', 14000000 + i * 500000, 14000000 + (i + 1) * 500000 - 1, 1, 1, q1=1., q2=60. + i) for i in range(9)])
+        region = ('2', 16000000, 16200000, 'AMP')
+        self.assertEqual(self.focal(rows, [region])['Focal_gain_2:16000000-16200000'].ccf_hat, 1.)
+
     def test_subclonal_focal_gain_has_its_ccf(self):
         rows = self.with_segments('2', seg_row('2', 15900000, 16300000, 1, 1, q1=1., q2=1.6))
         event = self.focal(rows, [self.AMP])['Focal_gain_2:16000000-16200000']
