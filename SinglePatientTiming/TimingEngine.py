@@ -33,9 +33,13 @@ class TimingOptions(object):
         subclonal mutation cluster to assign them to. Events whose CCF cannot be told from it stay unknown.
     wgd_override: {sample name: True or False} for samples whose doubled status is known from elsewhere. It replaces
         the arm rule of TimingSample.call_wgd for those samples; samples not in it keep the rule.
+    loy_wgd_min_odds: None, or the odds of a loss of Y before the WGD against two losses after it that every sample
+        must reach, in loy_odds {sample name: odds}, for a doubled tumor without Y to be timed before its WGD. Below
+        it, or without odds, the loss is clonal and unresolved. Parsimony alone is weak when the WGD came early.
     """
     def __init__(self, sex=None, sex_aware=False, continuous_cn=False, clonal_unresolved=False, segment_homdels=False,
-                 y_callable_blocks=Y_CALLABLE_BLOCKS_HG19, cn_event_tol=.2, cn_clonal_min_ccf=.8, wgd_override=None):
+                 y_callable_blocks=Y_CALLABLE_BLOCKS_HG19, cn_event_tol=.2, cn_clonal_min_ccf=.8, wgd_override=None,
+                 loy_wgd_min_odds=None, loy_odds=None):
         label = SEX_LABELS.get(str(sex).strip().upper())
         if sex_aware and label is None:
             raise ValueError('sex_aware timing requires the sex of the patient, as XY or XX. Got: {!r}'.format(sex))
@@ -48,6 +52,8 @@ class TimingOptions(object):
         self.cn_event_tol = cn_event_tol
         self.cn_clonal_min_ccf = cn_clonal_min_ccf
         self.wgd_override = dict(wgd_override or {})
+        self.loy_wgd_min_odds = loy_wgd_min_odds
+        self.loy_odds = dict(loy_odds or {})
 
     @property
     def male(self):
@@ -112,6 +118,14 @@ class TimingEngine(object):
         if ccf - margin < self.options.cn_clonal_min_ccf:
             return None
         return True
+
+    def _loy_before_wgd_unsupported(self, event):
+        """True if the WGD rule would place this loss of Y before the WGD while the odds given do not support it."""
+        if self.options.loy_wgd_min_odds is None or event.Type != 'Chrom_loss' or str(event.chrN) != 'Y' \
+                or event.allelic_cn != 0.:
+            return False
+        odds = [self.options.loy_odds.get(sample.sample_name) for sample in self.sample_list]
+        return not all(value is not None and value >= self.options.loy_wgd_min_odds for value in odds)
 
     def _drop_wgd_only_states(self):
         """Arm states kept only to time a WGD have no events. Without a WGD they would read as gains against one copy."""
@@ -829,6 +843,8 @@ class TimingEngine(object):
                             _set_status(cn_event, status='estimated', source='wgd_rule', reason=None)
                         else:
                             _set_not_estimable(cn_event, reason='unsupported_gain_state')
+                    elif self._loy_before_wgd_unsupported(cn_event):
+                        _set_not_estimable(cn_event, reason='loy_wgd_odds_below_min')
                     elif cn_event.Type.endswith('loss'):
                         cn_event.get_pi_dist_for_loss(self.WGD)
                         if cn_event.pi_dist is not None:

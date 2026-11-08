@@ -500,6 +500,14 @@ def build_parser():
                                default=0.8,
                                help='With --continuous_cn, and for chrY with --sex_aware: copy-number events below this CCF '
                                     'are subclonal, above it clonal, and too close to it to tell they stay unknown.')
+    timing_parent.add_argument('--loy_wgd_min_odds',
+                               type=float,
+                               action='store',
+                               dest='loy_wgd_min_odds',
+                               default=None,
+                               help='With --sex_aware: time a doubled tumor without Y before its WGD only where the SIF '
+                                    'column odds_pre_wgd (loss before the WGD against two losses after it) reaches this. '
+                                    'Otherwise, or where the column is empty, the loss stays clonal and unresolved.')
     timing_parent.add_argument('--focal_gain_max_length',
                                type=int,
                                action='store',

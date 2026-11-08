@@ -1224,6 +1224,50 @@ class SameSideOfWgd(TimingCase):
         self.assertEqual(comps[pair], (0.0, 0.0, 1.0))
 
 
+class LoyOdds(TimingCase):
+    """Fix 7: a doubled tumor without Y is placed before its WGD only where Tau's odds reach the minimum."""
+    def loss_y(self, y_cn, odds, minimum=3.):
+        rows = whole_genome(self.genome, male=True, baseline=(2, 2)) + y_rows(y_cn)
+        options = TimingOptions(sex='XY', loy_wgd_min_odds=minimum, loy_odds=odds, **ALL_ON)
+        engine = self.run_engine(rows, muts=doubled_arm_muts(), options=options)
+        self.assertIsNotNone(engine.WGD)
+        return engine, self.events(engine)['loss_Y']
+
+    def test_strong_odds_keep_the_rule(self):
+        engine, event = self.loss_y(0., {'S1': 3.06})
+        self.assertEqual(event.timing_status, 'estimated')
+        self.assertLess(self.pi_mean(event.pi_dist), self.pi_mean(engine.WGD.pi_dist))
+
+    def test_weak_or_missing_odds_leave_it_unresolved(self):
+        for odds in ({'S1': .73}, {}):
+            _, event = self.loss_y(0., odds)
+            self.assertEqual(event.timing_status, 'clonal_unresolved', msg=str(odds))
+            self.assertEqual(event.timing_reason, 'loy_wgd_odds_below_min')
+            self.assertIsNone(event.pi_dist)
+
+    def test_one_copy_left_is_unaffected(self):
+        engine, event = self.loss_y(1., {})
+        self.assertEqual(event.timing_status, 'estimated')
+        self.assertGreater(self.pi_mean(event.pi_dist), self.pi_mean(engine.WGD.pi_dist))
+
+    def test_without_the_option_nothing_changes(self):
+        rows = whole_genome(self.genome, male=True, baseline=(2, 2)) + y_rows(0.)
+        engine = self.run_engine(rows, muts=doubled_arm_muts(), options=TimingOptions(sex='XY', loy_odds={'S1': .1}, **ALL_ON))
+        self.assertEqual(self.events(engine)['loss_Y'].timing_status, 'estimated')
+
+    def test_cli(self):
+        cli = CommandLine('run_cli')
+        cli.tmp, cli.genome = self.tmp, self.genome
+        rows = whole_genome(self.genome, male=True, baseline=(2, 2)) + y_rows(0.)
+        flags = ['--sex_aware', '--continuous_cn', '--clonal_unresolved', '--loy_wgd_min_odds', '3']
+        for odds, expected in (('0.73', 'clonal_unresolved'), ('', 'clonal_unresolved'), ('48.2', 'estimated')):
+            done = cli.run_cli(rows, 'XY', *flags, extra={'odds_pre_wgd': odds}, muts=doubled_arm_muts())
+            self.assertEqual(done.returncode, 0, done.stderr[-800:])
+            self.assertEqual(cli.table().set_index('Event Name').loc['loss_Y', 'timing_status'], expected, msg=odds)
+        self.assertNotEqual(cli.run_cli(rows, 'XY', *flags, muts=doubled_arm_muts()).returncode, 0)
+        self.assertNotEqual(cli.run_cli(rows, 'XY', '--loy_wgd_min_odds', '3', extra={'odds_pre_wgd': '5'}).returncode, 0)
+
+
 class LeagueInformation(unittest.TestCase):
     def league(self):
         league = object.__new__(League)

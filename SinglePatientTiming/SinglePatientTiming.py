@@ -37,6 +37,7 @@ def run_tool(args):
 
     sex = None
     wgd_override = {}
+    loy_odds = {}
     if args.sif:  # if sif file is specified
         sif = pd.read_csv(args.sif, sep="\t")
         if args.sex_aware:
@@ -49,6 +50,13 @@ def run_tool(args):
                 doubled = _sif_flag(row['doubled'], 'doubled')
                 if doubled is not None:
                     wgd_override[str(row['sample_id'])] = doubled
+        if args.loy_wgd_min_odds is not None:
+            if 'odds_pre_wgd' not in sif.columns:
+                raise ValueError('--loy_wgd_min_odds needs an odds_pre_wgd column in the SIF, empty where unknown.')
+            for _, row in sif.iterrows():
+                odds = pd.to_numeric(pd.Series([row['odds_pre_wgd']]), errors='raise').iloc[0]
+                if odds == odds:
+                    loy_odds[str(row['sample_id'])] = float(odds)
         for _, row in sif.iterrows():
             patient_data.addSample(
                 row['maf_fn'],
@@ -89,9 +97,14 @@ def run_tool(args):
         raise ValueError('--intersect_cn_trees does not use the new timing options.')
     if args.homdel_artifact_file and not args.segment_homdels:
         raise ValueError('--homdel_artifact_file has no effect without --segment_homdels.')
+    if args.loy_wgd_min_odds is not None and not args.sex_aware:
+        raise ValueError('--loy_wgd_min_odds applies to the loss_Y event of --sex_aware.')
+    if args.loy_wgd_min_odds is not None and not args.sif:
+        raise ValueError('--loy_wgd_min_odds reads its odds from the SIF.')
     options = TimingEngine.TimingOptions(sex=sex, sex_aware=args.sex_aware, continuous_cn=args.continuous_cn,
                                          clonal_unresolved=args.clonal_unresolved, segment_homdels=args.segment_homdels,
-                                         cn_clonal_min_ccf=args.cn_clonal_min_ccf, wgd_override=wgd_override)
+                                         cn_clonal_min_ccf=args.cn_clonal_min_ccf, wgd_override=wgd_override,
+                                         loy_wgd_min_odds=args.loy_wgd_min_odds, loy_odds=loy_odds)
     if options.male:
         patient_data.hemizygous_chroms = {'X', 'Y'}
     if args.intersect_cn_trees:
