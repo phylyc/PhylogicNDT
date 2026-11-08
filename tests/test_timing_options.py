@@ -920,12 +920,14 @@ class Reader(TimingCase):
 
 
 class CommandLine(TimingCase):
-    def run_cli(self, rows, sex, *flags, focal=None):
-        maf_path, seg_path = self.write_inputs('S1', rows, ())
+    def run_cli(self, rows, sex, *flags, focal=None, extra=None, muts=()):
+        maf_path, seg_path = self.write_inputs('S1', rows, muts)
         sif = os.path.join(self.tmp, 'input.sif')
         table = {'sample_id': ['S1'], 'maf_fn': [maf_path], 'seg_fn': [seg_path], 'purity': [PURITY], 'timepoint': [0], 'tmb': [1]}
         if sex is not None:
             table['sex'] = [sex]
+        for column, value in (extra or {}).items():
+            table[column] = [value]
         pd.DataFrame(table).to_csv(sif, sep='\t', index=False)
         command = [sys.executable, os.path.join(REPO, 'PhylogicNDT.py'), 'Timing', '-i', 'P1', '-sif', sif, *flags]
         if focal:
@@ -1002,6 +1004,61 @@ class CommandLine(TimingCase):
         self.assertNotEqual(self.run_cli(rows, 'XY', '--continuous_cn', '--intersect_cn_trees').returncode, 0)
         self.assertNotEqual(self.run_cli(rows, 'XY', '--sex_aware', '--genome_build', 'hg38').returncode, 0)
         self.assertNotEqual(self.run_cli(rows, 'XY', '--homdel_artifact_file', 'x').returncode, 0)
+
+
+def doubled_arm_muts(chromosomes=tuple(map(str, range(1, 9))), depth=80):
+    """Clonal SNVs at multiplicity 1 and 2 on both arms of 2/2 chromosomes, which time a WGD."""
+    muts = []
+    for c in chromosomes:
+        for i in range(10):
+            alt = int(depth * (.444 if i % 2 else .222))
+            muts += [(c, 2000000 + i * 1000, 1, 'A', depth - alt, alt), (c, 140000000 + i * 1000, 1, 'A', depth - alt, alt)]
+    return muts
+
+
+class WgdOverride(TimingCase):
+    """Fix 2: a doubled status given in the SIF replaces Timing's arm rule for that sample."""
+    def partly_doubled(self):
+        # 16 of 41 called arms at 2/2: short of the half the arm rule asks for.
+        doubled = [str(c) for c in range(1, 9)]
+        rows = [r for r in whole_genome(self.genome, male=False) if r[0] not in doubled]
+        rows += [seg_row(c, 1000, self.genome.CHROM_DICT[c] - 1000, 2, 2) for c in doubled]
+        return rows
+
+    def options(self, override=None):
+        return TimingOptions(sex='XX', sex_aware=True, continuous_cn=True, clonal_unresolved=True, wgd_override=override)
+
+    def test_true_calls_a_wgd_the_rule_misses(self):
+        rows = self.partly_doubled()
+        self.assertIsNone(self.run_engine(rows, muts=doubled_arm_muts(), options=self.options()).WGD)
+        engine = self.run_engine(rows, muts=doubled_arm_muts(), options=self.options({'S1': True}))
+        self.assertIsNotNone(engine.WGD)
+        self.assertEqual(engine.WGD.timing_status, 'estimated')
+        # Arms at 1/1 now read as losses after the doubling, the 2/2 arms as no event.
+        self.assertIn('loss_9p', self.events(engine))
+        self.assertNotIn('gain_1p', self.events(engine))
+
+    def test_false_removes_a_wgd_the_rule_calls(self):
+        rows = whole_genome(self.genome, male=False, baseline=(2, 2))
+        self.assertIsNotNone(self.run_engine(rows, muts=doubled_arm_muts(), options=self.options()).WGD)
+        engine = self.run_engine(rows, muts=doubled_arm_muts(), options=self.options({'S1': False}))
+        self.assertIsNone(engine.WGD)
+        self.assertIn('gain_1p', self.events(engine))
+
+    def test_other_samples_keep_the_rule(self):
+        engine = self.run_engine(self.partly_doubled(), muts=doubled_arm_muts(), options=self.options({'S2': True}))
+        self.assertIsNone(engine.WGD)
+
+    def test_sif_column_reaches_the_engine(self):
+        cli = CommandLine('run_cli')
+        cli.tmp, cli.genome = self.tmp, self.genome
+        rows = self.partly_doubled()
+        flags = ['--sex_aware', '--continuous_cn', '--clonal_unresolved']
+        for value, expected in (('True', True), ('', False), ('False', False)):
+            done = cli.run_cli(rows, 'XX', *flags, extra={'doubled': value}, muts=doubled_arm_muts())
+            self.assertEqual(done.returncode, 0, done.stderr[-800:])
+            self.assertEqual('WGD' in set(cli.table()['Event Name']), expected, msg=value)
+        self.assertNotEqual(cli.run_cli(rows, 'XX', *flags, extra={'doubled': 'maybe'}).returncode, 0)
 
 
 class LeagueInformation(unittest.TestCase):

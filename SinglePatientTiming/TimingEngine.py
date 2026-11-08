@@ -31,9 +31,11 @@ class TimingOptions(object):
         and the largest copy number still read as no copy left.
     cn_clonal_min_ccf: copy-number events below this CCF in any sample are subclonal, also when the tumor has no
         subclonal mutation cluster to assign them to. Events whose CCF cannot be told from it stay unknown.
+    wgd_override: {sample name: True or False} for samples whose doubled status is known from elsewhere. It replaces
+        the arm rule of TimingSample.call_wgd for those samples; samples not in it keep the rule.
     """
     def __init__(self, sex=None, sex_aware=False, continuous_cn=False, clonal_unresolved=False, segment_homdels=False,
-                 y_callable_blocks=Y_CALLABLE_BLOCKS_HG19, cn_event_tol=.2, cn_clonal_min_ccf=.8):
+                 y_callable_blocks=Y_CALLABLE_BLOCKS_HG19, cn_event_tol=.2, cn_clonal_min_ccf=.8, wgd_override=None):
         label = SEX_LABELS.get(str(sex).strip().upper())
         if sex_aware and label is None:
             raise ValueError('sex_aware timing requires the sex of the patient, as XY or XX. Got: {!r}'.format(sex))
@@ -45,6 +47,7 @@ class TimingOptions(object):
         self.y_callable_blocks = y_callable_blocks
         self.cn_event_tol = cn_event_tol
         self.cn_clonal_min_ccf = cn_clonal_min_ccf
+        self.wgd_override = dict(wgd_override or {})
 
     @property
     def male(self):
@@ -1203,8 +1206,16 @@ class TimingSample(object):
                     regions_supporting_WGD.append(cn_state)
                 if cn_state.cn_a1 >= 2 and cn_state.cn_a2 >= 2:
                     regions_both_arms_gained.append(cn_state)
-            if len(regions_both_arms_gained) >= 5 and len(regions_supporting_WGD) * 2 >= \
-                    len(self.arm_regions) - len(self.missing_arms):
+            doubled = len(regions_both_arms_gained) >= 5 and len(regions_supporting_WGD) * 2 >= \
+                len(self.arm_regions) - len(self.missing_arms)
+            override = self.options.wgd_override.get(self.sample_name)
+            if override is not None:
+                if override != doubled:
+                    print('WGD of sample {} set to {} as given, against {} by the arm rule ({} of {} called arms '
+                          'support it)'.format(self.sample_name, override, doubled, len(regions_supporting_WGD),
+                                               len(self.arm_regions) - len(self.missing_arms)))
+                doubled = override
+            if doubled:
                 supporting_arm_states = [TimingCNState([self], s.chrN, s.arm, (s.cn_a1, s.cn_a2), s.purity, supporting_muts=s.supporting_muts) for
                                          s in supporting_arm_states]
                 self.WGD = TimingWGD(supporting_arm_states=supporting_arm_states)

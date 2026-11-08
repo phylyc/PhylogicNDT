@@ -14,6 +14,20 @@ PI_GRID = np.linspace(0, 1, 101)
 STATUS_RANK = {'subclonal': 1, 'ambiguous_clonality': 2, 'clonal_unresolved': 3, 'prior_only': 4, 'estimated': 5}
 
 
+def _sif_flag(value, column):
+    """True, False, or None for an empty cell of an optional True/False SIF column."""
+    if value is None or (isinstance(value, float) and np.isnan(value)):
+        return None
+    text = str(value).strip().upper()
+    if text in ('', 'NA', 'NAN', 'NONE'):
+        return None
+    if text in ('TRUE', 'T', '1', '1.0'):
+        return True
+    if text in ('FALSE', 'F', '0', '0.0'):
+        return False
+    raise ValueError('SIF column {} takes True, False or an empty value. Got: {!r}'.format(column, value))
+
+
 def run_tool(args):
     logging.debug('Arguments {}'.format(args))
 
@@ -22,12 +36,19 @@ def run_tool(args):
                            driver_genes_file=args.driver_genes_file, genome_build=args.genome_build)
 
     sex = None
+    wgd_override = {}
     if args.sif:  # if sif file is specified
         sif = pd.read_csv(args.sif, sep="\t")
         if args.sex_aware:
             if 'sex' not in sif.columns or sif['sex'].isna().any() or sif['sex'].astype(str).str.strip().str.upper().nunique() != 1:
                 raise ValueError('--sex_aware needs a sex column in the SIF with one value per patient, on every row.')
             sex = sif['sex'].iloc[0]
+        if 'doubled' in sif.columns:
+            # Doubled status known from elsewhere replaces the arm rule for that sample. Empty keeps the rule.
+            for _, row in sif.iterrows():
+                doubled = _sif_flag(row['doubled'], 'doubled')
+                if doubled is not None:
+                    wgd_override[str(row['sample_id'])] = doubled
         for _, row in sif.iterrows():
             patient_data.addSample(
                 row['maf_fn'],
@@ -70,7 +91,7 @@ def run_tool(args):
         raise ValueError('--homdel_artifact_file has no effect without --segment_homdels.')
     options = TimingEngine.TimingOptions(sex=sex, sex_aware=args.sex_aware, continuous_cn=args.continuous_cn,
                                          clonal_unresolved=args.clonal_unresolved, segment_homdels=args.segment_homdels,
-                                         cn_clonal_min_ccf=args.cn_clonal_min_ccf)
+                                         cn_clonal_min_ccf=args.cn_clonal_min_ccf, wgd_override=wgd_override)
     if options.male:
         patient_data.hemizygous_chroms = {'X', 'Y'}
     if args.intersect_cn_trees:
