@@ -1268,6 +1268,49 @@ class LoyOdds(TimingCase):
         self.assertNotEqual(cli.run_cli(rows, 'XY', '--loy_wgd_min_odds', '3', extra={'odds_pre_wgd': '5'}).returncode, 0)
 
 
+class Seed(TimingCase):
+    """Fix 8: --seed makes Timing's own simulation of detection power reproducible."""
+    def gained(self, seed):
+        rows = [r for r in whole_genome(self.genome, male=False) if r[0] != '17']
+        rows += [seg_row('17', 1000, 22000000, 1, 2), seg_row('17', 25000000, 81000000, 1, 1)]
+        depth = 100
+        alt = int(depth * 2 * PURITY / (3 * PURITY + 2 * (1 - PURITY)))
+        muts = [('17', 5000000 + i * 1000, 1, 'A', depth - alt, alt) for i in range(12)]
+        options = TimingOptions(sex='XX', sex_aware=True, continuous_cn=True, clonal_unresolved=True, seed=seed)
+        return self.events(self.run_engine(rows, muts=muts, options=options))['gain_17p']
+
+    def test_same_seed_same_result_in_any_order(self):
+        event = self.gained(5)
+        first = event._simulate_p2()
+        np.random.seed(99)
+        random.seed(99)
+        self.assertTrue(np.array_equal(first, event._simulate_p2()))
+        self.assertTrue(np.array_equal(event.pi_dist, self.gained(5).pi_dist))
+
+    def test_without_a_seed_the_global_state_is_used(self):
+        event = self.gained(None)
+        np.random.seed(3)
+        random.seed(3)
+        first = event._simulate_p2()
+        np.random.seed(3)
+        random.seed(3)
+        self.assertTrue(np.array_equal(first, event._simulate_p2()))
+        self.assertFalse(np.array_equal(first, event._simulate_p2()))
+
+    def test_cli_runs_with_one_seed_are_identical(self):
+        cli = CommandLine('run_cli')
+        cli.tmp, cli.genome = self.tmp, self.genome
+        rows = [r for r in whole_genome(self.genome, male=False) if r[0] != '17']
+        rows += [seg_row('17', 1000, 22000000, 1, 2), seg_row('17', 25000000, 81000000, 1, 1)]
+        muts = [('17', 5000000 + i * 1000, 1, 'A', 60, 40) for i in range(12)]
+        tables = []
+        for _ in range(2):
+            self.assertEqual(cli.run_cli(rows, 'XX', '--seed', '3', muts=muts).returncode, 0)
+            with open(os.path.join(self.tmp, 'P1.timing.tsv')) as handle:
+                tables.append(handle.read())
+        self.assertEqual(tables[0], tables[1])
+
+
 class LeagueInformation(unittest.TestCase):
     def league(self):
         league = object.__new__(League)

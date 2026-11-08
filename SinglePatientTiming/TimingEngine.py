@@ -6,6 +6,7 @@ import scipy.stats
 import scipy.interpolate
 from scipy.special import logsumexp
 import random
+import zlib
 import data.Enums as Enums
 
 # Mappable chrY blocks in hg19. Neither Y arm reaches the 50% coverage required of an arm, so chrY is called as one
@@ -36,10 +37,12 @@ class TimingOptions(object):
     loy_wgd_min_odds: None, or the odds of a loss of Y before the WGD against two losses after it that every sample
         must reach, in loy_odds {sample name: odds}, for a doubled tumor without Y to be timed before its WGD. Below
         it, or without odds, the loss is clonal and unresolved. Parsimony alone is weak when the WGD came early.
+    seed: None uses the global random state. A number gives each simulation of detection power its own random state,
+        derived from the seed and the event, so a run is reproducible and does not depend on the order events are timed.
     """
     def __init__(self, sex=None, sex_aware=False, continuous_cn=False, clonal_unresolved=False, segment_homdels=False,
                  y_callable_blocks=Y_CALLABLE_BLOCKS_HG19, cn_event_tol=.2, cn_clonal_min_ccf=.8, wgd_override=None,
-                 loy_wgd_min_odds=None, loy_odds=None):
+                 loy_wgd_min_odds=None, loy_odds=None, seed=None):
         label = SEX_LABELS.get(str(sex).strip().upper())
         if sex_aware and label is None:
             raise ValueError('sex_aware timing requires the sex of the patient, as XY or XX. Got: {!r}'.format(sex))
@@ -54,6 +57,7 @@ class TimingOptions(object):
         self.wgd_override = dict(wgd_override or {})
         self.loy_wgd_min_odds = loy_wgd_min_odds
         self.loy_odds = dict(loy_odds or {})
+        self.seed = seed
 
     @property
     def male(self):
@@ -1636,8 +1640,18 @@ class TimingCNEvent(object):
         """
         coverage_list = []
         muts_list = list(self.supporting_muts)
+        shuffle, binomial = random.shuffle, np.random.binomial
+        seed = getattr(getattr(self.state, 'options', None), 'seed', None)
+        if seed is not None:
+            # Supporting mutations are sorted first, so the draw depends on the seed and the event only.
+            muts_list.sort(key=lambda mut: mut.var_str)
+            key = [seed, self.Type, self.chrN, self.arm, self.copy_number, self.allelic_cn, self.start, self.end]
+            key += [mut.var_str for mut in muts_list] + [getattr(s, 'sample_name', '') for s in self.sample_list]
+            key = '|'.join(map(str, key))
+            state = zlib.crc32(key.encode())
+            shuffle, binomial = random.Random(state).shuffle, np.random.RandomState(state).binomial
         while len(coverage_list) < n_iter:
-            random.shuffle(muts_list)
+            shuffle(muts_list)
             for mut in muts_list:
                 coverage = mut.ref_cnt + mut.alt_cnt
                 if hasattr(coverage, '__iter__'):
@@ -1655,7 +1669,7 @@ class TimingCNEvent(object):
                 cov = np.asarray(cov, dtype=float)
                 mult = 1 if i < n_m1_muts else 2
                 expected_af = mult * purity / (germline * (1 - purity) + self.total_cn * purity)
-                alt_count = np.random.binomial(cov.astype(int), expected_af).astype(float)
+                alt_count = binomial(cov.astype(int), expected_af).astype(float)
                 af_mode = np.divide(alt_count, cov, out=np.zeros_like(alt_count, dtype=float), where=(cov > 0))
                 ccf_mode = af_mode * (germline * (1 - purity) + purity * self.total_cn) / purity
                 if all(ccf_mode >= .86) and all(alt_count >= 3):

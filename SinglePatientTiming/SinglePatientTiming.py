@@ -104,7 +104,7 @@ def run_tool(args):
     options = TimingEngine.TimingOptions(sex=sex, sex_aware=args.sex_aware, continuous_cn=args.continuous_cn,
                                          clonal_unresolved=args.clonal_unresolved, segment_homdels=args.segment_homdels,
                                          cn_clonal_min_ccf=args.cn_clonal_min_ccf, wgd_override=wgd_override,
-                                         loy_wgd_min_odds=args.loy_wgd_min_odds, loy_odds=loy_odds)
+                                         loy_wgd_min_odds=args.loy_wgd_min_odds, loy_odds=loy_odds, seed=args.seed)
     if options.male:
         patient_data.hemizygous_chroms = {'X', 'Y'}
     if args.intersect_cn_trees:
