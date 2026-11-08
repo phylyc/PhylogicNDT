@@ -1248,7 +1248,8 @@ class PhylogicOutput(object):
         header.extend('pi_{}'.format(float(x) / 100) for x in range(101))
         extended = timing_engine.options.extended_output
         if extended:
-            header.extend(['timing_status', 'is_clonal', 'ccf_hat', 'allele', 'ccf_sd', 'continuous_cn'])
+            header.extend(['timing_status', 'is_clonal', 'ccf_hat', 'allele', 'ccf_sd', 'continuous_cn', 'wgd_side',
+                           'timing_reason'])
         patient_name = timing_engine.patient.indiv_name
         null_pi = ('',) * 101
         with open(patient_name + '.timing.tsv', 'w') as f:
@@ -1263,7 +1264,7 @@ class PhylogicOutput(object):
                 line = [patient_name, 'WGD', '', '', '', '', '', '', '', '', '', '', pi_mean, pi_low, pi_high]
                 line.extend(pi_dist)
                 if extended:
-                    line.extend([timing_engine.WGD.timing_status, True, '', '', '', ''])
+                    line.extend([timing_engine.WGD.timing_status, True, '', '', '', '', '', ''])
                 f.write('\n' + '\t'.join(map(str, line)))
             for cn_event_list in timing_engine.all_cn_events.values():
                 for cn_event in cn_event_list:
@@ -1279,7 +1280,8 @@ class PhylogicOutput(object):
                     if extended:
                         line.extend([cn_event.timing_status, cn_event.is_clonal, cn_event.ccf_hat,
                                      cn_event.allele or '', '' if cn_event.ccf_sd is None else cn_event.ccf_sd,
-                                     '' if cn_event.continuous_cn is None else cn_event.continuous_cn])
+                                     '' if cn_event.continuous_cn is None else cn_event.continuous_cn,
+                                     getattr(cn_event, 'wgd_side', None) or '', cn_event.timing_reason or ''])
                     f.write('\n' + '\t'.join(map(str, line)))
             for mut in timing_engine.mutations.values():
                 if mut.pi_dist is not None and not any(np.isnan(mut.pi_dist)):
@@ -1292,7 +1294,7 @@ class PhylogicOutput(object):
                         mut.local_cn_a1, mut.local_cn_a2, '', pi_mean, pi_low, pi_high]
                 line.extend(pi_dist)
                 if extended:
-                    line.extend([mut.timing_status or '', mut.is_clonal, '', '', '', ''])
+                    line.extend([mut.timing_status or '', mut.is_clonal, '', '', '', '', '', ''])
                 f.write('\n' + '\t'.join(map(str, line)))
         if timing_engine.WGD is not None:
             wgd_header = ['Patient_ID', 'Event Name', 'Chromosome', 'Arm', 'Allelic_CN_minor', 'Allelic_CN_major',

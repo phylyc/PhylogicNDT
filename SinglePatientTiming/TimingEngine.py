@@ -837,6 +837,9 @@ class TimingEngine(object):
                             _set_not_estimable(cn_event, reason='unsupported_loss_state')
                     else:
                         _set_not_estimable(cn_event, reason='unsupported_event_type')
+                    if self.options.clonal_unresolved and cn_event.timing_source == 'wgd_rule':
+                        # Events the rule puts on one side of the WGD share one distribution, which orders neither.
+                        cn_event.wgd_side = cn_event.rule_side
 
         # ------------------------------------------------------------------
         # No-WGD path
@@ -1469,6 +1472,8 @@ class TimingCNEvent(object):
         self.continuous_cn = None
         self.clonality_ambiguous = False
         self.high_level = False  # a focal amplification far above its arm, see Patient._continuous_focal_call
+        self.rule_side = None  # 'before' or 'after' the WGD, when the WGD rule placed the event there
+        self.wgd_side = None  # rule_side, kept with clonal_unresolved: two events on one side cannot be ordered
 
 
     def __repr__(self):
@@ -1654,8 +1659,10 @@ class TimingCNEvent(object):
             return
         if self.allelic_cn == 0.:  # loss before WGD
             pi_dist = 1 - np.cumsum(WGD.pi_dist)
+            self.rule_side = 'before'
         elif self.allelic_cn == 1.:  # loss after WGD
             pi_dist = np.cumsum(WGD.pi_dist)
+            self.rule_side = 'after'
         else:
             return
         self.pi_dist = pi_dist / sum(pi_dist)
@@ -1669,8 +1676,10 @@ class TimingCNEvent(object):
             return
         if self.allelic_cn == 3.:  # loss after WGD
             pi_dist = np.cumsum(WGD.pi_dist)
+            self.rule_side = 'after'
         elif self.allelic_cn >= 4.:  # loss before WGD
             pi_dist = 1 - np.cumsum(WGD.pi_dist)
+            self.rule_side = 'before'
         else:
             return
         self.pi_dist = pi_dist / sum(pi_dist)

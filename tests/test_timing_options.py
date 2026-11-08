@@ -1170,6 +1170,60 @@ class AmpliconsAndWgd(FocalCase):
         self.assertLess(self.pi_mean(event.pi_dist), self.pi_mean(engine.WGD.pi_dist))
 
 
+class SameSideOfWgd(TimingCase):
+    """Fix 6: two events the WGD rule places on one side of the WGD cannot be ordered against each other."""
+    @staticmethod
+    def dists():
+        grid = np.linspace(0, 1, 101)
+        wgd = np.exp(-((grid - .4) ** 2) / .002)
+        wgd /= wgd.sum()
+        before = 1 - np.cumsum(wgd)
+        after = np.cumsum(wgd)
+        return wgd, before / before.sum(), after / after.sum()
+
+    def test_rule(self):
+        wgd, before, after = self.dists()
+        comps = spt.compare_event_list([
+            spt.TimedEvent('WGD', wgd, 'estimated'),
+            spt.TimedEvent('loss_Y', before, 'estimated', 'before'),
+            spt.TimedEvent('loss_11q', before, 'estimated', 'before'),
+            spt.TimedEvent('loss_3p', after, 'estimated', 'after'),
+            spt.TimedEvent('gain_7p', after, 'estimated', 'after'),
+        ])
+        self.assertEqual(comps[('loss_Y', 'loss_11q')], (0.0, 0.0, 1.0))
+        self.assertEqual(comps[('loss_3p', 'gain_7p')], (0.0, 0.0, 1.0))
+        self.assertGreater(comps[('loss_Y', 'loss_3p')][0], .9)
+        self.assertGreater(comps[('WGD', 'loss_Y')][1], .8)
+        # Without sides, identical distributions still score as a game, as before.
+        self.assertGreater(spt.compare_event_list([spt.TimedEvent('a', before, 'estimated'),
+                                                   spt.TimedEvent('b', before, 'estimated')])[('a', 'b')][0], .2)
+
+    def test_table_round_trip(self):
+        rows = [r for r in whole_genome(self.genome, male=True, baseline=(2, 2)) if r[0] != '17'] + y_rows(0.)
+        rows += [seg_row('17', 1000, 22000000, 0, 2), seg_row('17', 25000000, 81000000, 2, 2)]
+        engine = self.run_engine(rows, muts=doubled_arm_muts(), options=TimingOptions(sex='XY', **ALL_ON))
+        events = self.events(engine)
+        self.assertEqual((events['loss_Y'].wgd_side, events['loss_17p'].wgd_side), ('before', 'before'))
+        os.chdir(self.tmp)
+        self.addCleanup(os.chdir, self.cwd)
+        PhylogicOutput().write_timing_tsv(engine)
+        table = pd.read_csv('P1.timing.tsv', sep='\t', low_memory=False).set_index('Event Name')
+        self.assertEqual(table.loc['loss_Y', 'wgd_side'], 'before')
+        self.assertTrue(pd.isna(table.loc['WGD', 'wgd_side']))
+        comps = spt.compare_event_list(spt.read_timed_events('P1.timing.tsv', compare_all=True))
+        pair = ('loss_Y', 'loss_17p') if ('loss_Y', 'loss_17p') in comps else ('loss_17p', 'loss_Y')
+        self.assertEqual(comps[pair], (0.0, 0.0, 1.0))
+        self.assertGreater(max(comps[('WGD', 'loss_Y')][:2]), .8)
+
+    def test_engine_comparisons_use_the_sides(self):
+        rows = [r for r in whole_genome(self.genome, male=True, baseline=(2, 2)) if r[0] != '17'] + y_rows(0.)
+        rows += [seg_row('17', 1000, 22000000, 0, 2), seg_row('17', 25000000, 81000000, 2, 2)]
+        engine = self.run_engine(rows, muts=doubled_arm_muts(), options=TimingOptions(sex='XY', **ALL_ON))
+        comps = spt.compare_events(engine)
+        pair = ('loss_Y', 'loss_17p') if ('loss_Y', 'loss_17p') in comps else ('loss_17p', 'loss_Y')
+        self.assertEqual(comps[pair], (0.0, 0.0, 1.0))
+
+
 class LeagueInformation(unittest.TestCase):
     def league(self):
         league = object.__new__(League)
