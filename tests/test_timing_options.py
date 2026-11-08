@@ -1482,6 +1482,27 @@ class WholeChromosomeEvents(TimingCase):
         self.assertNotIn('loss_9p', events)
 
 
+class GainOfY(TimingCase):
+    """Fix 8: chrY gains are emitted as gain_Y, relative to one copy, or two after a WGD."""
+    def test_two_copies_without_wgd(self):
+        rows = whole_genome(self.genome, male=True) + y_rows(1.95)
+        event = self.events(self.run_engine(rows, options=TimingOptions(sex='XY', **ALL_ON)))['gain_Y']
+        self.assertEqual(event.Type, 'Chrom_gain')
+        self.assertEqual(event.allelic_cn, 2.)
+        self.assertTrue(event.is_clonal)
+        self.assertEqual(event.timing_status, 'clonal_unresolved')
+
+    def test_after_wgd(self):
+        rows = whole_genome(self.genome, male=True, baseline=(2, 2)) + y_rows(3.)
+        engine = self.run_engine(rows, muts=doubled_arm_muts(), options=TimingOptions(sex='XY', **ALL_ON))
+        event = self.events(engine)['gain_Y']
+        self.assertEqual(event.allelic_cn, 3.)
+        self.assertEqual(event.wgd_side, 'after')
+        rows = whole_genome(self.genome, male=True, baseline=(2, 2)) + y_rows(2.)
+        engine = self.run_engine(rows, muts=doubled_arm_muts(), options=TimingOptions(sex='XY', **ALL_ON))
+        self.assertEqual([name for name in self.events(engine) if 'Y' in name], [])
+
+
 class LeagueInformation(unittest.TestCase):
     def league(self):
         league = object.__new__(League)
