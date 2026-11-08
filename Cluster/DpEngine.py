@@ -722,7 +722,13 @@ def lstirling(n, m):
         
         n = n - 1
         m = m - 1
-        res = root_scalar(phiprime, bracket=[0.1, n*m])
+        # phiprime runs from -inf at 0 to positive at n*m. Above about 14,500 items the root for m = 1 falls below
+        # 0.1, where the bracket used to start, and root_scalar raised. Lower the bracket only then, so every case
+        # that worked before keeps its bracket and its value.
+        lower = 0.1
+        while phiprime(lower) > 0:
+            lower /= 10
+        res = root_scalar(phiprime, bracket=[lower, n*m])
         x0 = res.root
         t0 = float(m) / (n - m)
         B = gammaln(x0 + n + 1) - gammaln(x0 + 1) - m * np.log(x0) - n * np.log(t0 + 1) + m * np.log(t0)
