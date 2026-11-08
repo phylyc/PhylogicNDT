@@ -1061,6 +1061,33 @@ class WgdOverride(TimingCase):
         self.assertNotEqual(cli.run_cli(rows, 'XX', *flags, extra={'doubled': 'maybe'}).returncode, 0)
 
 
+class UncappedExcess(TimingCase):
+    """Fix 3: a gain far above the next copy is clonal however noisy, because its excess is tested before the cap."""
+    def gain(self, q2, sigma, continuous=True):
+        rows = [r for r in whole_genome(self.genome, male=False) if r[0] != '17']
+        rows += [seg_row('17', 1000, 22000000, 1, int(round(q2)), q1=1., q2=q2, sigma=sigma), seg_row('17', 25000000, 81000000, 1, 1)]
+        options = TimingOptions(sex='XX', sex_aware=True, continuous_cn=continuous, clonal_unresolved=True)
+        return self.events(self.run_engine(rows, options=options))['gain_17p']
+
+    def test_high_noisy_gain_is_clonal(self):
+        # As NBE7 17q at 6.1 copies: CCF capped at 1 with sd 0.16 lies within the margin of the 0.8 cutoff.
+        event = self.gain(6.1, .09)
+        self.assertGreater(event.ccf_sd, .15)
+        self.assertTrue(event.is_clonal)
+        self.assertEqual(event.timing_status, 'clonal_unresolved')
+        self.assertEqual(event.ccf_hat, 1.)
+
+    def test_one_copy_gain_is_judged_as_before(self):
+        self.assertEqual(self.gain(1.9, .09).timing_status, 'ambiguous_clonality')
+        self.assertEqual(self.gain(1.4, .01).timing_status, 'subclonal')
+
+    def test_loss_keeps_the_capped_test(self):
+        rows = [r for r in whole_genome(self.genome, male=False) if r[0] != '17']
+        rows += [seg_row('17', 1000, 22000000, 0, 1, q1=.12, sigma=.09), seg_row('17', 25000000, 81000000, 1, 1)]
+        options = TimingOptions(sex='XX', sex_aware=True, continuous_cn=True, clonal_unresolved=True)
+        self.assertEqual(self.events(self.run_engine(rows, options=options))['loss_17p'].timing_status, 'ambiguous_clonality')
+
+
 class LeagueInformation(unittest.TestCase):
     def league(self):
         league = object.__new__(League)

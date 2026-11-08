@@ -266,16 +266,20 @@ class TimingEngine(object):
                 etype = eve.Type  # 'Arm_gain' or 'Arm_loss'
                 ccf_hats = []
                 ccf_sds = []
+                ccf_tests = []
                 for sample in self.sample_list:
                     s_state = sample.cn_states.get(cn_state)
                     if s_state is None:
                         ccf_hats.append(0.0)
                         ccf_sds.append(0.0)
+                        ccf_tests.append(0.0)
                         continue
                     # find the matching event by Type and allele; default to 0 if missing
                     match = next((e for e in s_state.cn_events if e.Type == etype and e.allele == eve.allele), None)
                     ccf_hats.append(float(getattr(match, 'ccf_hat', 0.0) or 0.0))
                     ccf_sds.append(float(getattr(match, 'ccf_sd', 0.0) or 0.0))
+                    test = getattr(match, 'clonality_ccf', None)
+                    ccf_tests.append(ccf_hats[-1] if test is None else float(test))
                 ccf_idx = np.clip(np.round(np.array(ccf_hats) * 100).astype(int), 0, 100)
                 clonal_concordance = np.prod(cluster_ccfs[1][sample_idx, ccf_idx])
                 is_clonal = True
@@ -285,8 +289,8 @@ class TimingEngine(object):
                         break
                 if self.options.continuous_cn or etype.startswith('Chrom_'):
                     # CCF from copy number decides. Mutation clusters are too narrow to judge a CCF of 0.9 against 1.
-                    lowest = int(np.argmin(ccf_hats))
-                    called = self._clonality(ccf_hats[lowest], ccf_sds[lowest])
+                    lowest = int(np.argmin(ccf_tests))
+                    called = self._clonality(ccf_tests[lowest], ccf_sds[lowest])
                     is_clonal = called is True
                     eve.clonality_ambiguous = called is None
                     eve.ccf_hat = ccf_hats[lowest]
@@ -1369,6 +1373,9 @@ class TimingCNState(object):
             event.allele = allele
             event.ccf_sd = sd
             event.continuous_cn = value
+            # A gain far above the next copy cannot be subclonal for want of cells: the clonality test reads the excess
+            # before the CCF is capped at 1, or the noise of a high gain would make it unknown.
+            event.clonality_ccf = value - baseline if value > baseline else called[1]
             self.cn_events.append(event)
 
     def call_events(self, cn_type_prefix=None, wgd=False):
