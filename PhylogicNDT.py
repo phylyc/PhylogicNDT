@@ -500,6 +500,20 @@ def build_parser():
                                default=0.8,
                                help='With --continuous_cn, and for chrY with --sex_aware: copy-number events below this CCF '
                                     'are subclonal, above it clonal, and too close to it to tell they stay unknown.')
+    timing_parent.add_argument('--focal_gain_max_length',
+                               type=int,
+                               action='store',
+                               dest='focal_gain_max_length',
+                               default=3000000,
+                               help='With --continuous_cn: longest segment accepted as a focal gain, in bp. Amplicon segments '
+                                    'in neuroblastoma reach about 2.4 Mb; the arm remnants beside 11q losses start at 4.6 Mb.')
+    timing_parent.add_argument('--focal_amp_ploidy',
+                               type=float,
+                               action='store',
+                               dest='focal_amp_ploidy',
+                               default=2.,
+                               help='With --continuous_cn: a focal gain this many times the ploidy above its arm is a '
+                                    'high-level amplification. It may then fill its own flanks, and is not timed against a WGD.')
 
     timing = subparsers.add_parser("Timing", help="Time somatic events in one or multiple samples.",
                                    parents=[base_parser, timing_parent])

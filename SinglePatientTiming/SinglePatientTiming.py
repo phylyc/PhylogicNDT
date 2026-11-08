@@ -104,7 +104,8 @@ def run_tool(args):
                 segment_homdels = dict(artifact_file=args.homdel_artifact_file, max_length=args.homdel_max_length,
                                        max_copies=args.homdel_max_copies, min_z=args.homdel_min_z)
             patient_data.add_focal_cn_events(focal_regions=args.gistic_fn, segment_homdels=segment_homdels,
-                                             continuous=args.continuous_cn)
+                                             continuous=args.continuous_cn, focal_gain_max_length=args.focal_gain_max_length,
+                                             focal_amp_ploidy=args.focal_amp_ploidy)
     patient_data.preprocess_samples()
     if args.min_supporting_muts < 1:
         raise ValueError('Invalid value for min_supporting_muts')

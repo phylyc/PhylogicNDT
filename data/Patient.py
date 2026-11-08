@@ -625,7 +625,8 @@ class Patient:
         return None if best is None else best[1:]
 
     def _continuous_focal_call(self, sample, chrom, start, end, arm_start, arm_end, kind, artifacts, min_overlap, min_step=.5,
-                               min_z=3., min_sd=.1, cn_tol=.2, flank_bp=2000000, max_arm_fraction=.3, min_probes=5, high_level_step=4.):
+                               min_z=3., min_sd=.1, cn_tol=.2, flank_bp=2000000, max_arm_fraction=.3, min_probes=5, high_level_step=4.,
+                               max_gain_length=None, high_level_ploidy=None, two_flanks=False, min_flank_fraction=.25):
         """
         A focal gain or loss in [start, end): the most extreme segment in the window, against what lies on either side.
 
@@ -634,14 +635,24 @@ class Patient:
         can fill its own flanks, so a gain this far above the arm counts as well. The modal columns and cancer.cell.frac
         cannot show any of this, since modal states stay near 1/1 at high amplification and the fraction is the distance to
         the nearest integer for gains. Returns None, or a dict with the allele that moved most, its CCF and the state reached.
+
+        With two_flanks, a gain needs two real flanks: segments covering min_flank_fraction of flank_bp on each side within
+        the arm, so that neither side is the centromere gap or a chromosome end. Given max_gain_length, its segment can be
+        no longer. Otherwise the remnant of an arm beside a partial loss passes on its one flank, as proximal 11q does.
+        Given high_level_ploidy, high amplification starts that many times the ploidy above the arm, instead of
+        high_level_step copies. The result says whether the gain reached it.
         """
         tree = sample.CnProfile[chrom]
         hemizygous = chrom in self.hemizygous_chroms
+        if high_level_ploidy is not None:
+            high_level_step = high_level_ploidy * sample.ploidy_from_segments()
         window = []
         for iv in tree.overlap(start, end):
             if min(iv.end, end) - max(iv.begin, start) < min_overlap or iv.data[1].get('total_cn_cont') is None:
                 continue
             if (iv.data[1].get('n_probes') or 0) < min_probes or iv.length() > max_arm_fraction * (arm_end - arm_start):
+                continue
+            if kind == 'AMP' and max_gain_length is not None and iv.length() > max_gain_length:
                 continue
             if kind == 'DEL' and self._in_artifact(iv.begin, iv.end, artifacts.get(chrom, ())):
                 continue
@@ -658,24 +669,30 @@ class Patient:
             values, weights = (np.array(x, dtype=float) for x in zip(*sorted(pairs)))
             return float(values[np.searchsorted(np.cumsum(weights), .5 * weights.sum())])
 
-        def side(lo, hi):
-            """Length-weighted medians of (total, a1, a2) over one flank, inside the arm."""
+        def side(lo, hi, cover=False):
+            """Length-weighted medians of (total, a1, a2) over one flank, inside the arm, and the length they cover."""
             lo, hi = max(lo, arm_start), min(hi, arm_end)
             rows = [] if hi <= lo else [(iv.data[1].get('total_cn_cont'), sample.allele_copy_number(iv.data[1]), min(iv.end, hi) - max(iv.begin, lo))
                                         for iv in tree.overlap(lo, hi) if iv != seg]
             rows = [row for row in rows if row[0] is not None]
-            return (weighted_median([(r[0], r[2]) for r in rows]), weighted_median([(r[1][0], r[2]) for r in rows]),
-                    weighted_median([(r[1][1], r[2]) for r in rows]))
+            medians = (weighted_median([(r[0], r[2]) for r in rows]), weighted_median([(r[1][0], r[2]) for r in rows]),
+                       weighted_median([(r[1][1], r[2]) for r in rows]))
+            return (medians, sum(r[2] for r in rows)) if cover else medians
 
-        flanks = [flank for flank in (side(seg.begin - flank_bp, seg.begin), side(seg.end, seg.end + flank_bp)) if flank[0] == flank[0]]
+        sides = [side(seg.begin - flank_bp, seg.begin, cover=True), side(seg.end, seg.end + flank_bp, cover=True)]
+        if kind == 'AMP' and two_flanks and any(length < min_flank_fraction * flank_bp for _, length in sides):
+            return None
+        flanks = [flank for flank, _ in sides if flank[0] == flank[0]]
         if not flanks:
             return None
         # The event must clear both sides: the higher flank for a gain and the lower one for a loss.
         flank = max(flanks, key=lambda f: f[0]) if kind == 'AMP' else min(flanks, key=lambda f: f[0])
+        high_level = False
         if kind == 'AMP':
             arm = side(arm_start, arm_end)
             if seg.data[1]['total_cn_cont'] - arm[0] >= high_level_step:
                 flank = arm
+                high_level = True
         step = seg.data[1]['total_cn_cont'] - flank[0]
         if (kind == 'AMP') != (step > 0):
             return None
@@ -696,9 +713,11 @@ class Patient:
         pair = (reached(a1), float(round(a2))) if use_a1 else (0. if hemizygous else float(round(a1)), reached(a2))
         if hemizygous and kind == 'DEL' and a2 >= cn_tol:
             pair = (0., float(a2))  # cells still hold the one allele, so this must not read as nothing left
-        return {'a1': use_a1, 'ccf': float(min(abs(delta), 1.)), 'cn': pair[0] if use_a1 else pair[1], 'pair': pair}
+        return {'a1': use_a1, 'ccf': float(min(abs(delta), 1.)), 'cn': pair[0] if use_a1 else pair[1], 'pair': pair,
+                'high_level': high_level}
 
-    def add_focal_cn_events(self, focal_regions, qval_max=None, focal_max_arm_frac=0.3, min_bp_overlap=1000, padding=100000, require_directional_consistency=False, split_across_centromere=True, segment_homdels=None, continuous=False):
+    def add_focal_cn_events(self, focal_regions, qval_max=None, focal_max_arm_frac=0.3, min_bp_overlap=1000, padding=100000, require_directional_consistency=False, split_across_centromere=True, segment_homdels=None, continuous=False,
+                            focal_gain_max_length=3000000, focal_amp_ploidy=2.):
         """
         Add focal CNV events (e.g., from GISTIC2 peaks) as CopyNumberEvents.
 
@@ -718,6 +737,8 @@ class Patient:
             segment_homdels: None keeps the window-mode homdel definition. A dict with artifact_file, max_length,
                 max_copies and min_z calls homdels per segment instead, see _segment_homdel_call.
             continuous: call focal gains and losses from continuous copy number against the arm, see _continuous_focal_call.
+                A gain then needs two real flanks and a segment of at most focal_gain_max_length bp, and is high-level
+                at focal_amp_ploidy times the ploidy above the arm.
         """
         homdel_artifacts = self._read_homdel_artifacts(segment_homdels['artifact_file']) if segment_homdels else {}
 
@@ -891,7 +912,9 @@ class Patient:
                         kind = 'DEL' if is_deletion else 'AMP'
                         arm_start, arm_end = (0, centromere) if arm_lbl == 'p' else (centromere, csize)
                         focal = [None if calls[i] is not None or not sample.CnProfile else
-                                 self._continuous_focal_call(sample, chrom, s0, e0, arm_start, arm_end, kind, homdel_artifacts, min_bp_overlap)
+                                 self._continuous_focal_call(sample, chrom, s0, e0, arm_start, arm_end, kind, homdel_artifacts, min_bp_overlap,
+                                                             max_gain_length=focal_gain_max_length, high_level_ploidy=focal_amp_ploidy,
+                                                             two_flanks=True)
                                  for i, sample in enumerate(self.sample_list)]
                         carriers = [call for call in focal if call is not None]
                         if carriers:
@@ -902,7 +925,8 @@ class Patient:
                                                           cn_category='Focal_gain' if kind == 'AMP' else 'Focal_loss',
                                                           ccf_hat=ccfs, ccf_high=ccfs, ccf_low=ccfs, a1=is_a1,
                                                           dupe=(kind == 'AMP') != is_a1,
-                                                          state_pairs=tuple(None if call is None else call['pair'] for call in focal))
+                                                          state_pairs=tuple(None if call is None else call['pair'] for call in focal),
+                                                          high_levels=tuple(None if call is None else call['high_level'] for call in focal))
                         continue
 
                     # summarize per-allele across samples
@@ -1121,7 +1145,8 @@ class Patient:
                             continue
                         self._add_cn_event_to_samples(chrom, min(clique_bands), max(clique_bands), clique_arm, local_cn, cn_category, clique_ccf_hat, clique_ccf_high, clique_ccf_low, a1=clique_allele == "a1")
 
-    def _add_cn_event_to_samples(self, chrom, start, end, arm, cns, cn_category, ccf_hat, ccf_high, ccf_low, a1=True, dupe=False, state_pairs=None):
+    def _add_cn_event_to_samples(self, chrom, start, end, arm, cns, cn_category, ccf_hat, ccf_high, ccf_low, a1=True, dupe=False, state_pairs=None,
+                                 high_levels=None):
         """
         Adds CN event to sample in low_coverage_mutations attr and mut hashtable
 
@@ -1136,6 +1161,7 @@ class Patient:
             cn = CopyNumberEvent(chrom, cn_category, start=start, end=end, ccf_hat=ccf_hat_i, ccf_high=ccf_high_i, ccf_low=ccf_low_i,
                                  local_cn=local_cn, from_sample=sample, arm=arm, a1=a1, dupe=dupe)
             cn.state_pair = None if state_pairs is None else state_pairs[i]
+            cn.high_level = None if high_levels is None else high_levels[i]
             sample.low_coverage_mutations.update({cn.var_str: cn})
             sample.add_muts_to_hashtable(cn)
 

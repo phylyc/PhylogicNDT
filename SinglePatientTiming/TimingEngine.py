@@ -469,9 +469,11 @@ class TimingEngine(object):
                     {
                         'ccf': np.zeros(n_samples, dtype=float),
                         'pairs': [None] * n_samples,
+                        'high_level': [None] * n_samples,
                     }
                 )
                 rec['ccf'][si] = float(getattr(cn, 'ccf_hat', 0.0))
+                rec['high_level'][si] = getattr(cn, 'high_level', None)
                 if self.options.segment_homdels and cn.cn_category == 'Focal_homdel':
                     # The call was made on one segment. The lowest modal state in the window need not agree with it.
                     rec['pairs'][si] = (0., 0.)
@@ -614,6 +616,8 @@ class TimingEngine(object):
             eve.carrier_sample_idx = tuple(matched_carrier_idx)
             eve.carrier_sample_names = tuple(self.sample_list[i].sample_name for i in matched_carrier_idx)
             eve.local_cn_consensus = consensus_state
+            # A high-level amplification in any carrier: its copy number says nothing of its order against a WGD.
+            eve.high_level = any(rec['high_level'][i] for i in matched_carrier_idx)
 
             # optional hook for a borrowed ARM-LEVEL prior later in time_events()
             # This is metadata only; no borrowed evidence is mixed into the local likelihood here.
@@ -815,6 +819,10 @@ class TimingEngine(object):
                         cn_event.pi_dist = uniform_dist.copy()
                         _set_status(cn_event, status='prior_only', source='homdel',
                                     reason='homdel_no_local_evidence')
+                    elif cn_event.Type.endswith('gain') and getattr(cn_event, 'high_level', False):
+                        # The parity rule counts copies made by doubling the genome. An amplicon, often extrachromosomal,
+                        # gains copies by its own route, so neither parity nor level places it against the WGD.
+                        _set_not_estimable(cn_event, reason='amplicon_vs_wgd')
                     elif cn_event.Type.endswith('gain'):
                         cn_event.get_pi_dist_for_higher_gain(self.WGD)
                         if cn_event.pi_dist is not None:
@@ -1460,6 +1468,7 @@ class TimingCNEvent(object):
         self.ccf_sd = None
         self.continuous_cn = None
         self.clonality_ambiguous = False
+        self.high_level = False  # a focal amplification far above its arm, see Patient._continuous_focal_call
 
 
     def __repr__(self):

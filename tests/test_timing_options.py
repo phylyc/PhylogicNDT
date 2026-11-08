@@ -508,7 +508,7 @@ class ClusterComparator(TimingCase):
         self.assertTrue(self.events(engine)['Focal_homdel_9:21000000-23000000'].is_clonal)
 
 
-class FocalEvents(TimingCase):
+class FocalCase(TimingCase):
     AMP = ('2', 16000000, 16200000, 'AMP')
     DEL = ('9', 8000000, 11000000, 'DEL')
 
@@ -522,6 +522,8 @@ class FocalEvents(TimingCase):
     def focal(self, rows, regions, options=None):
         return self.events(self.run_engine(rows, focal=regions, options=options or TimingOptions(sex='XX', **ALL_ON)))
 
+
+class FocalEvents(FocalCase):
     def test_amplification_with_modal_one_one_is_seen(self):
         # As in real MYCN amplifications, the modal columns stay at 1/1 while total copy number is in the hundreds.
         rows = self.with_segments('2', seg_row('2', 15900000, 16300000, 1, 1, q1=1., q2=99.))
@@ -1086,6 +1088,86 @@ class UncappedExcess(TimingCase):
         rows += [seg_row('17', 1000, 22000000, 0, 1, q1=.12, sigma=.09), seg_row('17', 25000000, 81000000, 1, 1)]
         options = TimingOptions(sex='XX', sex_aware=True, continuous_cn=True, clonal_unresolved=True)
         self.assertEqual(self.events(self.run_engine(rows, options=options))['loss_17p'].timing_status, 'ambiguous_clonality')
+
+
+class FocalGainShape(FocalCase):
+    """Fix 4: a focal gain needs two real flanks and a short segment, and high level is relative to ploidy."""
+    def test_gain_against_the_centromere_has_one_flank(self):
+        # A short gained segment starting at the 11q centromere edge, measured against its distal side only.
+        size = self.genome.CHROM_DICT['11']
+        rows = [r for r in whole_genome(self.genome, male=False) if r[0] != '11']
+        rows += [seg_row('11', 1000, 51000000, 1, 1), seg_row('11', 54000000, 56000000, 1, 2), seg_row('11', 56000001, size - 1000, 1, 1)]
+        self.assertNotIn('Focal_gain_11:55000000-55100000', self.focal(rows, [('11', 55000000, 55100000, 'AMP')]))
+
+    def test_gain_against_the_chromosome_end_has_one_flank(self):
+        rows = self.with_segments('5', seg_row('5', 10000, 1300000, 1, 2))
+        rows = [r for r in rows if not (r[0] == '5' and r[2] == 9999)]
+        self.assertNotIn('Focal_gain_5:1253262-1295184', self.focal(rows, [('5', 1253262, 1295184, 'AMP')]))
+
+    def test_focal_gain_near_the_chromosome_end_keeps_a_short_flank(self):
+        # TERT lies 1.25 Mb from the 5p end: a flank of about 1 Mb is real.
+        rows = [r for r in whole_genome(self.genome, male=False) if r[0] != '5']
+        rows += [seg_row('5', 10000, 1099999, 1, 1), seg_row('5', 1100000, 1300000, 1, 3),
+                 seg_row('5', 1300001, self.genome.CHROM_DICT['5'] - 1000, 1, 1)]
+        self.assertIn('Focal_gain_5:1253262-1295184', self.focal(rows, [('5', 1253262, 1295184, 'AMP')]))
+
+    def test_long_gain_is_not_focal(self):
+        self.assertNotIn('Focal_gain_2:16000000-16200000', self.focal(self.with_segments('2', seg_row('2', 14000000, 17500000, 1, 2)), [self.AMP]))
+        self.assertIn('Focal_gain_2:16000000-16200000', self.focal(self.with_segments('2', seg_row('2', 14500000, 17000000, 1, 2)), [self.AMP]))
+
+    def test_long_amplicon_segment_is_not_focal_either(self):
+        self.assertNotIn('Focal_gain_2:16000000-16200000',
+                         self.focal(self.with_segments('2', seg_row('2', 14000000, 17500000, 1, 1, q1=1., q2=60.)), [self.AMP]))
+
+    def plateau(self, baseline, step):
+        """Nine 0.5 Mb segments all `step` copies above the arm, so the flanks are as high as the window."""
+        a2 = baseline[1] + step
+        middle = [seg_row('2', 14000000 + i * 500000, 14000000 + (i + 1) * 500000 - 1, *baseline, q1=float(baseline[0]), q2=float(a2))
+                  for i in range(9)]
+        return self.with_segments('2', *middle, baseline=baseline)
+
+    def test_high_level_is_relative_to_ploidy(self):
+        # Five copies above the arm: high level at ploidy 2 (from 4 copies), not at ploidy 4 (from 8).
+        self.assertIn('Focal_gain_2:16000000-16200000', self.focal(self.plateau((1, 1), 5), [self.AMP]))
+        self.assertNotIn('Focal_gain_2:16000000-16200000', self.focal(self.plateau((2, 2), 5), [self.AMP]))
+        self.assertIn('Focal_gain_2:16000000-16200000', self.focal(self.plateau((2, 2), 9), [self.AMP]))
+
+    def test_cli_parameters_reach_the_call(self):
+        cli = CommandLine('run_cli')
+        cli.tmp, cli.genome = self.tmp, self.genome
+        rows = self.with_segments('2', seg_row('2', 14500000, 17000000, 1, 2))
+        focal = '2\t16000000\t16200000\tAMP\t0.01\tregion\n'
+        flags = ['--sex_aware', '--continuous_cn', '--clonal_unresolved']
+        self.assertEqual(cli.run_cli(rows, 'XX', *flags, focal=focal).returncode, 0)
+        self.assertIn('Focal_gain_2:16000000-16200000', set(cli.table()['Event Name']))
+        self.assertEqual(cli.run_cli(rows, 'XX', *flags, '--focal_gain_max_length', '2000000', focal=focal).returncode, 0)
+        self.assertNotIn('Focal_gain_2:16000000-16200000', set(cli.table()['Event Name']))
+        rows = self.plateau((1, 1), 5)
+        self.assertEqual(cli.run_cli(rows, 'XX', *flags, '--focal_amp_ploidy', '3', focal=focal).returncode, 0)
+        self.assertNotIn('Focal_gain_2:16000000-16200000', set(cli.table()['Event Name']))
+
+
+class AmpliconsAndWgd(FocalCase):
+    """Fix 5: in a doubled tumor, a high-level amplification is not ordered against the WGD by its copy number."""
+    def doubled(self, *middle):
+        return self.run_engine(self.with_segments('2', *middle, baseline=(2, 2)), muts=doubled_arm_muts(), focal=[self.AMP],
+                               options=TimingOptions(sex='XX', **ALL_ON))
+
+    def test_amplicon_is_unresolved_against_the_wgd(self):
+        engine = self.doubled(seg_row('2', 15900000, 16300000, 2, 2, q1=2., q2=99.))
+        self.assertIsNotNone(engine.WGD)
+        event = self.events(engine)['Focal_gain_2:16000000-16200000']
+        self.assertTrue(event.high_level)
+        self.assertEqual(event.timing_status, 'clonal_unresolved')
+        self.assertEqual(event.timing_reason, 'amplicon_vs_wgd')
+        self.assertIsNone(event.pi_dist)
+
+    def test_low_level_focal_gain_keeps_the_rule(self):
+        engine = self.doubled(seg_row('2', 15900000, 16300000, 2, 4))
+        event = self.events(engine)['Focal_gain_2:16000000-16200000']
+        self.assertFalse(event.high_level)
+        self.assertEqual(event.timing_status, 'estimated')
+        self.assertLess(self.pi_mean(event.pi_dist), self.pi_mean(engine.WGD.pi_dist))
 
 
 class LeagueInformation(unittest.TestCase):

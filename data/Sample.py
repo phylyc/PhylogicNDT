@@ -461,6 +461,16 @@ class TumorSample:
                 self._copy_ratio_line = (float(slope), float(intercept))
         return self._copy_ratio_line
 
+    def ploidy_from_segments(self):
+        """Length-weighted mean total copy number of the autosomal segments, or 2 if they hold none."""
+        if not hasattr(self, '_ploidy_from_segments'):
+            pairs = [(iv.data[1].get('total_cn_cont'), iv.length())
+                     for chrom, tree in self.CnProfile.items() if str(chrom).replace('chr', '') not in ('X', 'Y') for iv in tree]
+            pairs = [(value, length) for value, length in pairs if value is not None and length > 0]
+            total = float(sum(length for _, length in pairs))
+            self._ploidy_from_segments = sum(value * length for value, length in pairs) / total if total > 0 else 2.
+        return self._ploidy_from_segments
+
     def allele_copy_number(self, data):
         """Continuous allelic copy number of a segment, as (a1, a2).
 
