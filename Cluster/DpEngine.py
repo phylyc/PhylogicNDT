@@ -37,6 +37,15 @@ else:
     except ImportError:
         from scipy.special import logsumexp as logsumexp
 
+# Same values as scipy's logsumexp, computed without its array-API overhead where the installed scipy is one this
+# replicates (see exact_logsumexp.py); otherwise scipy's own.
+from .exact_logsumexp import REPLICATES_SCIPY, exact_logsumexp
+
+if REPLICATES_SCIPY:
+    logsumexp_scipy = exact_logsumexp
+    if pkgutil.find_loader('sselogsumexp') is None:
+        logsumexp = exact_logsumexp
+
 
 class DpEngine:
 
@@ -313,17 +322,29 @@ class DpEngine:
     def n_muts(self):
         return len(self.mutations)
 
+    # These run for every mutation and cluster on every iteration. On the (samples x bins) arrays they get, a loop over
+    # the rows gives the same values as np.apply_along_axis, whose own overhead was most of their cost; any other input
+    # takes the original path, errors included.
     @staticmethod
     def logsum_of_marginals(loghist):
-        return np.sum(np.apply_along_axis(lambda x: logsumexp(x), 1, loghist))
+        loghist = np.asarray(loghist)
+        if loghist.ndim != 2 or not len(loghist):
+            return np.sum(np.apply_along_axis(lambda x: logsumexp(x), 1, loghist))
+        return np.sum(np.array([logsumexp(x) for x in loghist]))
 
     @staticmethod
     def logsum_of_marginals_per_sample(loghist):
-        return np.apply_along_axis(lambda x: logsumexp(x), 1, np.array(loghist, dtype=np.float32))
+        loghist = np.array(loghist, dtype=np.float32)
+        if loghist.ndim != 2 or not len(loghist):
+            return np.apply_along_axis(lambda x: logsumexp(x), 1, loghist)
+        return np.array([logsumexp(x) for x in loghist])
 
     def normalize_loghist_with_prior(self, loghist):
         # Normalize in each dimension
-        return np.apply_along_axis(lambda x: x - logsumexp(x), 1, loghist + self.logprior)
+        loghist = loghist + self.logprior
+        if np.ndim(loghist) != 2 or not len(loghist):
+            return np.apply_along_axis(lambda x: x - logsumexp(x), 1, loghist)
+        return np.array([x - logsumexp(x) for x in loghist])
 
 
 # from scipy.interpolate import interp1d

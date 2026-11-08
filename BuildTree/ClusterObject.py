@@ -93,7 +93,7 @@ class Cluster:
             self._mutations[mutation] = mutation_nd_hist
             if update_cluster_hist:
                 self._update_density(mutation_nd_hist, action='add')
-            logging.debug("Added mutation {} to cluster {}.".format(mutation.var_str, self._identifier))
+            logging.debug("Added mutation %s to cluster %s.", mutation.var_str, self._identifier)
         else:
             logging.error("Can not add mutation {} to cluster {}. It is already there.".format(mutation.var_str, self._identifier))
 
@@ -105,7 +105,7 @@ class Cluster:
             del self._mutations[mutation]
             if update_cluster_hist:
                 self._update_density(mutation_nd_hist, action='sub')
-            logging.debug("Removed mutation {} from cluster {}.".format(mutation.var_str, self._identifier))
+            logging.debug("Removed mutation %s from cluster %s.", mutation.var_str, self._identifier)
         else:
             logging.error("Can not remove mutation {} from cluster {}. It is not there".format(mutation.var_str,
                                                                                                self._identifier))
@@ -127,7 +127,11 @@ class Cluster:
 
     def _normalize_in_log_space(self, hist):
         """ Normalize in each dimension in log space """
-        return np.apply_along_axis(lambda x: x - self.logSumExp(x), 1, hist)
+        # On (samples x bins) arrays a loop over the rows gives the same values as np.apply_along_axis, without its
+        # overhead; any other input takes the original path, errors included.
+        if np.ndim(hist) != 2 or not len(hist):
+            return np.apply_along_axis(lambda x: x - self.logSumExp(x), 1, hist)
+        return np.array([x - self.logSumExp(x) for x in hist])
 
     def _add_mutation(self, mut_hist):
         """ Update cluster density after adding mutation to it """
@@ -148,7 +152,7 @@ class Cluster:
         self._loghist = self._normalize_loghist_with_prior(self._loghist)
         # Updating hist
         logging.debug('Updating histogram after adding or removing a mutation')
-        self._hist = np.apply_along_axis(np.exp, 1, self._loghist)
+        self._hist = np.exp(self._loghist)
 
     def add_mutations(self, mutations):
         for mutation in mutations:

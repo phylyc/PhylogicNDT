@@ -11,7 +11,12 @@ def logSumExp(ns):
 
 
 def logsum_of_marginals_per_sample(loghist):
-    return np.apply_along_axis(lambda x: logSumExp(x), 1, np.array(loghist, dtype=np.float64))
+    # On (samples x bins) arrays a loop over the rows gives the same values as np.apply_along_axis, without its
+    # overhead; any other input takes the original path, errors included.
+    loghist = np.array(loghist, dtype=np.float64)
+    if loghist.ndim != 2 or not len(loghist):
+        return np.apply_along_axis(lambda x: logSumExp(x), 1, loghist)
+    return np.array([logSumExp(x) for x in loghist])
 
 
 def shuffling(clustering_results, sample_list):
@@ -30,7 +35,7 @@ def shuffling(clustering_results, sample_list):
         for cluster_idx, cluster in clustering_results.items():
             # Skip if the current point is the only thing in the cluster
             if cluster.cluster_size == 1 and mut.cluster_assignment == cluster_idx:
-                logging.debug('Cluster {} has one mutation {}'.format(cluster.identifier, mut))
+                logging.debug('Cluster %s has one mutation %s', cluster.identifier, mut)
                 continue
 
             if mut not in cluster.mutations:
@@ -42,13 +47,13 @@ def shuffling(clustering_results, sample_list):
         loglik = np.sum(loglik, axis=1)
         c_lik = np.exp(loglik - logSumExp(loglik))
         new_cluster_idx = np.nonzero(np.random.multinomial(1, c_lik) == 1)[0][0] + 1
-        logging.debug('Mutation {} old cluster assignment {}, new cluster assignment {}'.format(mut.var_str,
-                                                                                                mut.cluster_assignment,
-                                                                                                new_cluster_idx))
-        logging.debug('Cluster likelihoods {}'.format(c_lik))
+        # Lazy arguments: formatting c_lik for a debug message that is not emitted cost a fifth of BuildTree.
+        logging.debug('Mutation %s old cluster assignment %s, new cluster assignment %s', mut.var_str,
+                      mut.cluster_assignment, new_cluster_idx)
+        logging.debug('Cluster likelihoods %s', c_lik)
         if new_cluster_idx != mut.cluster_assignment:
             count_moved_mutations += 1
-            logging.debug('Mutation {} was assigned to new cluster {}'.format(mut.var_str, str(new_cluster_idx)))
+            logging.debug('Mutation %s was assigned to new cluster %s', mut.var_str, str(new_cluster_idx))
             old_cluster = clustering_results[mut.cluster_assignment]
             new_cluster = clustering_results[new_cluster_idx]
             old_cluster.remove_mutation(mut, update_cluster_hist=True)
