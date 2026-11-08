@@ -44,11 +44,13 @@ class TimingOptions(object):
     terminal_arm_min_fraction: None, or the share of an arm a terminal run of segments must cover to be called as an
         event of that arm when the whole-arm call misses it, as for 1p36 and distal 11q losses. Needs continuous_cn.
     terminal_arm_min_length: the run must also span this many bp, so that on short arms it is no focal event.
+    whole_chromosome_events: an event found on both arms of a chromosome in the same state is one whole-chromosome
+        event (gain_17, not gain_17p and gain_17q), so numerical and segmental changes stay apart.
     """
     def __init__(self, sex=None, sex_aware=False, continuous_cn=False, clonal_unresolved=False, segment_homdels=False,
                  y_callable_blocks=Y_CALLABLE_BLOCKS_HG19, cn_event_tol=.2, cn_clonal_min_ccf=.8, wgd_override=None,
                  loy_wgd_min_odds=None, loy_odds=None, seed=None, terminal_arm_min_fraction=None,
-                 terminal_arm_min_length=5000000):
+                 terminal_arm_min_length=5000000, whole_chromosome_events=False):
         label = SEX_LABELS.get(str(sex).strip().upper())
         if sex_aware and label is None:
             raise ValueError('sex_aware timing requires the sex of the patient, as XY or XX. Got: {!r}'.format(sex))
@@ -68,6 +70,7 @@ class TimingOptions(object):
             raise ValueError('Terminal partial-arm events are called from continuous copy number: set continuous_cn.')
         self.terminal_arm_min_fraction = terminal_arm_min_fraction
         self.terminal_arm_min_length = terminal_arm_min_length
+        self.whole_chromosome_events = whole_chromosome_events
 
     @property
     def male(self):
@@ -122,6 +125,8 @@ class TimingEngine(object):
         self.get_mutations()
         self.truncal_cn_events = {}
         self.get_arm_level_cn_events()
+        if self.options.whole_chromosome_events:
+            self.merge_whole_chromosome_events()
         self.get_focal_cn_events()
 
     def _clonality(self, ccf, sd=0.):
@@ -688,6 +693,55 @@ class TimingEngine(object):
             if is_clonal:
                 self.truncal_cn_events.setdefault(eve.event_name, []).append(eve)
 
+    def merge_whole_chromosome_events(self):
+        """
+        One event for a change on both arms of a chromosome in the same state, named for the chromosome (gain_17).
+
+        A numerical gain of chromosome 17 otherwise reads as gain_17p and gain_17q, and so counts as the segmental 17q
+        gain. The arms must hold the same modal state and continuous values within the tolerance, and the event must be
+        on the same allele of both. Its mutations are those of both arms, its CCF the lower of the two, and it is clonal
+        only if both are. Acrocentric chromosomes have no called p arm and keep their q-arm names. Terminal partial-arm
+        states are left alone, and so is chrY, which is one event already.
+        """
+        tol = self.options.cn_event_tol
+        for chrN in self.genome.CHROMS:
+            p, q = self.concordant_cn_states.get(chrN + 'p'), self.concordant_cn_states.get(chrN + 'q')
+            if p is None or q is None or (p.cn_a1, p.cn_a2) != (q.cn_a1, q.cn_a2) or not p.cn_events or not q.cn_events:
+                continue
+            values = [s.continuous if s.continuous is not None else (s.cn_a1, s.cn_a2) for s in (p, q)]
+            if any(abs(a - b) > tol for a, b in zip(*values) if np.isfinite(a) and np.isfinite(b)):
+                continue
+            weights = np.array([self.genome.CENT_DICT[chrN], self.genome.CHROM_DICT[chrN] - self.genome.CENT_DICT[chrN]],
+                               dtype=float)
+            weights /= weights.sum()
+            continuous = tuple(float(np.nansum(weights * np.array([values[0][i], values[1][i]]))) for i in range(2))
+            sds = [s.continuous_sd if s.continuous_sd is not None else (0., 0.) for s in (p, q)]
+            continuous_sd = tuple(float(np.sqrt(np.sum((weights * np.array([sds[0][i], sds[1][i]])) ** 2)))
+                                  for i in range(2))
+            muts = list(p.supporting_muts) + [mut for mut in q.supporting_muts if mut not in p.supporting_muts]
+            state = TimingCNState(p.sample_list, chrN, '', (p.cn_a1, p.cn_a2), p.purity, supporting_muts=muts,
+                                  continuous=continuous, continuous_sd=continuous_sd, cn_type_prefix='Chrom')
+            state.call_events(wgd=self.WGD is not None)
+            state.merged_arms = (p, q)
+            for p_event in list(p.cn_events):
+                kind = p_event.Type.split('_', 1)[1]
+                q_event = next((e for e in q.cn_events if e.Type == p_event.Type and e.allele == p_event.allele), None)
+                event = next((e for e in state.cn_events if e.Type == 'Chrom_' + kind and e.allele == p_event.allele), None)
+                if q_event is None or event is None:
+                    continue
+                pair = (p_event, q_event)
+                lower = min(pair, key=lambda e: -1. if e.ccf_hat is None else e.ccf_hat)
+                event.ccf_hat = lower.ccf_hat
+                event.is_clonal = bool(p_event.is_clonal and q_event.is_clonal)
+                event.clonality_ambiguous = not event.is_clonal and any(e.clonality_ambiguous for e in pair)
+                event.merged_arms = pair
+                for events in (self.all_cn_events, self.truncal_cn_events):
+                    for arm_event in pair:
+                        if arm_event in events.get(arm_event.event_name, []):
+                            events[arm_event.event_name].remove(arm_event)
+                    if events is self.all_cn_events or event.is_clonal:
+                        events.setdefault(event.event_name, []).append(event)
+
     def _get_cluster_ccfs(self):
         n_samples = len(self.sample_list)
         cluster_ccfs = {}
@@ -908,6 +962,9 @@ class TimingEngine(object):
 
                 if _time_gain_from_local(ev):
                     arm_prior_lookup[(ev.Type, ev.chrN, ev.arm, ev.cn_a1, ev.cn_a2)] = ev.pi_dist.copy()
+                    for arm_event in getattr(ev, 'merged_arms', ()):
+                        # Focal events look up the prior of their arm.
+                        arm_prior_lookup[(arm_event.Type, ev.chrN, arm_event.arm, ev.cn_a1, ev.cn_a2)] = ev.pi_dist.copy()
                 else:
                     # In the no-WGD setting, non-gains / unsupported gains are not event-specifically timeable
                     _set_not_estimable(

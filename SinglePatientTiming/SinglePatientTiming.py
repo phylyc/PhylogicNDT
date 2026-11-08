@@ -110,7 +110,8 @@ def run_tool(args):
                                          cn_clonal_min_ccf=args.cn_clonal_min_ccf, wgd_override=wgd_override,
                                          loy_wgd_min_odds=args.loy_wgd_min_odds, loy_odds=loy_odds, seed=args.seed,
                                          terminal_arm_min_fraction=args.terminal_arm_events,
-                                         terminal_arm_min_length=args.terminal_arm_min_length)
+                                         terminal_arm_min_length=args.terminal_arm_min_length,
+                                         whole_chromosome_events=args.whole_chromosome_events)
     if options.male:
         patient_data.hemizygous_chroms = {'X', 'Y'}
     if args.intersect_cn_trees:

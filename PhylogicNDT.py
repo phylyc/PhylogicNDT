@@ -523,6 +523,12 @@ def build_parser():
                                dest='terminal_arm_min_length',
                                default=5000000,
                                help='With --terminal_arm_events: the run must also span this many bp.')
+    timing_parent.add_argument('--whole_chromosome_events',
+                               action='store_true',
+                               dest='whole_chromosome_events',
+                               default=False,
+                               help='Name an event on both arms of a chromosome in the same state for the chromosome '
+                                    '(gain_17), not for each arm (gain_17p, gain_17q).')
     timing_parent.add_argument('--focal_gain_max_length',
                                type=int,
                                action='store',

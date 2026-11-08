@@ -1408,6 +1408,80 @@ class TerminalArmEvents(TimingCase):
         self.assertNotEqual(cli.run_cli(rows, 'XX', '--sex_aware', '--terminal_arm_events', '0.1').returncode, 0)
 
 
+class WholeChromosomeEvents(TimingCase):
+    """Fix 8: a change of both arms in one state is one whole-chromosome event."""
+    def engine(self, rows, whole=True, male=False, muts=(), focal=None, segment_homdels=False):
+        options = TimingOptions(sex='XY' if male else 'XX', sex_aware=True, continuous_cn=True, clonal_unresolved=True,
+                                segment_homdels=segment_homdels, whole_chromosome_events=whole)
+        return self.run_engine(rows, muts=muts, options=options, focal=focal)
+
+    def seventeen(self, p, q):
+        rows = [r for r in whole_genome(self.genome, male=False) if r[0] != '17']
+        return rows + [seg_row('17', 1000, 22000000, *p), seg_row('17', 25000000, 81000000, *q)]
+
+    def test_whole_chromosome_gain(self):
+        events = self.events(self.engine(self.seventeen((1, 2), (1, 2))))
+        self.assertEqual(events['gain_17'].Type, 'Chrom_gain')
+        self.assertTrue(events['gain_17'].is_clonal)
+        self.assertNotIn('gain_17q', events)
+        self.assertNotIn('gain_17p', events)
+        events = self.events(self.engine(self.seventeen((1, 2), (1, 2)), whole=False))
+        self.assertIn('gain_17q', events)
+        self.assertNotIn('gain_17', events)
+
+    def test_segmental_gain_keeps_its_arm_name(self):
+        events = self.events(self.engine(self.seventeen((1, 1), (1, 2))))
+        self.assertIn('gain_17q', events)
+        self.assertNotIn('gain_17', events)
+
+    def test_different_states_keep_arm_names(self):
+        events = self.events(self.engine(self.seventeen((1, 2), (1, 3))))
+        self.assertIn('gain_17p', events)
+        self.assertIn('gain_17q', events)
+        self.assertNotIn('gain_17', events)
+
+    def test_clonality_is_the_lower_of_the_arms(self):
+        events = self.events(self.engine(self.seventeen((1, 1), (1, 1))))
+        self.assertNotIn('gain_17', events)
+        rows = [r for r in whole_genome(self.genome, male=False) if r[0] != '17']
+        rows += [seg_row('17', 1000, 22000000, 1, 1, q2=1.45), seg_row('17', 25000000, 81000000, 1, 1, q2=1.55)]
+        event = self.events(self.engine(rows))['gain_17']
+        self.assertAlmostEqual(event.ccf_hat, .45)
+        self.assertEqual(event.timing_status, 'subclonal')
+
+    def test_mutations_of_both_arms_time_it(self):
+        depth = 100
+        def muts(m):
+            alt = int(depth * m * PURITY / (3 * PURITY + 2 * (1 - PURITY)))
+            return [(c, start + i * 1000, 1, 'A', depth - alt, alt) for c, start in (('17', 5000000), ('17', 40000000)) for i in range(6)]
+        early = self.events(self.engine(self.seventeen((1, 2), (1, 2)), muts=muts(2)))['gain_17']
+        late = self.events(self.engine(self.seventeen((1, 2), (1, 2)), muts=muts(1)))['gain_17']
+        self.assertEqual(len(early.supporting_muts), 12)
+        self.assertEqual(early.timing_status, 'estimated')
+        self.assertGreater(self.pi_mean(early.pi_dist), self.pi_mean(late.pi_dist) + .3)
+
+    def test_male_x_and_y(self):
+        rows = [r for r in whole_genome(self.genome, male=True) if r[0] != 'X'] + y_rows(0.)
+        size = self.genome.CHROM_DICT['X']
+        rows += [hemizygous_row('X', 1000, 58000000, 2.), hemizygous_row('X', 62000000, size - 1000, 2.)]
+        events = self.events(self.engine(rows, male=True))
+        self.assertEqual(events['gain_X'].Type, 'Chrom_gain')
+        self.assertEqual(events['gain_X'].allele, 'a2')
+        self.assertNotIn('gain_Xp', events)
+        self.assertEqual(events['loss_Y'].Type, 'Chrom_loss')
+        self.assertTrue(events['loss_Y'].is_clonal)
+
+    def test_homdel_is_unaffected(self):
+        rows = [r for r in whole_genome(self.genome, male=False) if r[0] != '9']
+        size = self.genome.CHROM_DICT['9']
+        rows += [seg_row('9', 1000, 21899999, 0, 1), seg_row('9', 21900000, 22100000, 0, 0, q1=.01, q2=.01),
+                 seg_row('9', 22100001, 38000000, 0, 1), seg_row('9', 71000000, size - 1000, 0, 1)]
+        events = self.events(self.engine(rows, focal=[('9', 21000000, 23000000, 'DEL')], segment_homdels=True))
+        self.assertIn('Focal_homdel_9:21000000-23000000', events)
+        self.assertIn('loss_9', events)
+        self.assertNotIn('loss_9p', events)
+
+
 class LeagueInformation(unittest.TestCase):
     def league(self):
         league = object.__new__(League)
