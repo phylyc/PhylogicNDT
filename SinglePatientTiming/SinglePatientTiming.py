@@ -101,10 +101,16 @@ def run_tool(args):
         raise ValueError('--loy_wgd_min_odds applies to the loss_Y event of --sex_aware.')
     if args.loy_wgd_min_odds is not None and not args.sif:
         raise ValueError('--loy_wgd_min_odds reads its odds from the SIF.')
+    if args.terminal_arm_events is not None and not args.continuous_cn:
+        raise ValueError('--terminal_arm_events needs --continuous_cn.')
+    if args.terminal_arm_events is not None and not 0. < args.terminal_arm_events <= 1.:
+        raise ValueError('--terminal_arm_events takes a share of the arm, above 0 and at most 1.')
     options = TimingEngine.TimingOptions(sex=sex, sex_aware=args.sex_aware, continuous_cn=args.continuous_cn,
                                          clonal_unresolved=args.clonal_unresolved, segment_homdels=args.segment_homdels,
                                          cn_clonal_min_ccf=args.cn_clonal_min_ccf, wgd_override=wgd_override,
-                                         loy_wgd_min_odds=args.loy_wgd_min_odds, loy_odds=loy_odds, seed=args.seed)
+                                         loy_wgd_min_odds=args.loy_wgd_min_odds, loy_odds=loy_odds, seed=args.seed,
+                                         terminal_arm_min_fraction=args.terminal_arm_events,
+                                         terminal_arm_min_length=args.terminal_arm_min_length)
     if options.male:
         patient_data.hemizygous_chroms = {'X', 'Y'}
     if args.intersect_cn_trees:

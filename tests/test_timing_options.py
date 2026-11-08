@@ -22,7 +22,7 @@ from data.Patient import Patient
 from LeagueModel.LeagueModelData import League
 from output.PhylogicOutput import PhylogicOutput
 from SinglePatientTiming import SinglePatientTiming as spt
-from SinglePatientTiming.TimingEngine import TimingEngine, TimingOptions, Y_CALLABLE_BLOCKS_HG19
+from SinglePatientTiming.TimingEngine import TimingEngine, TimingOptions, TERMINAL, Y_CALLABLE_BLOCKS_HG19
 
 ALL_ON = dict(sex_aware=True, continuous_cn=True, clonal_unresolved=True, segment_homdels=True)
 SEG_COLUMNS = ['Chromosome', 'Start.bp', 'End.bp', 'n_probes', 'seg_sigma', 'total_copy_ratio', 'rescaled_total_cn',
@@ -1309,6 +1309,103 @@ class Seed(TimingCase):
             with open(os.path.join(self.tmp, 'P1.timing.tsv')) as handle:
                 tables.append(handle.read())
         self.assertEqual(tables[0], tables[1])
+
+
+class TerminalArmEvents(TimingCase):
+    """Fix 8: terminal partial-arm events such as 1p36 loss, called where the whole-arm call misses them."""
+    def chrom(self, chrom, *segments, fraction=.2, male=False, baseline=(1, 1), muts=()):
+        rows = [r for r in whole_genome(self.genome, male=male, baseline=baseline) if r[0] != chrom] + list(segments)
+        options = TimingOptions(sex='XY' if male else 'XX', sex_aware=True, continuous_cn=True, clonal_unresolved=True,
+                                terminal_arm_min_fraction=fraction)
+        return self.run_engine(rows, muts=muts, options=options)
+
+    def one_p(self, deleted_to, fraction=.2):
+        size = self.genome.CHROM_DICT['1']
+        return self.chrom('1', seg_row('1', 1000, deleted_to, 0, 1), seg_row('1', deleted_to + 1, 124000000, 1, 1),
+                          seg_row('1', 126000000, size - 1000, 1, 1), fraction=fraction)
+
+    def test_terminal_loss_is_called_under_the_arm_name(self):
+        engine = self.one_p(30000000)
+        event = self.events(engine)['loss_1p']
+        self.assertEqual(event.Type, 'Arm_loss')
+        self.assertTrue(event.is_clonal)
+        self.assertIsNotNone(event.state.terminal)
+        self.assertNotIn('loss_1p', self.events(self.one_p(30000000, fraction=None)))
+
+    def test_short_terminal_run_is_not_called(self):
+        self.assertNotIn('loss_1p', self.events(self.one_p(20000000)))
+        self.assertIn('loss_1p', self.events(self.one_p(20000000, fraction=.15)))
+
+    def test_interstitial_loss_is_not_terminal(self):
+        size = self.genome.CHROM_DICT['1']
+        engine = self.chrom('1', seg_row('1', 1000, 40000000, 1, 1), seg_row('1', 40000001, 70000000, 0, 1),
+                            seg_row('1', 70000001, 124000000, 1, 1), seg_row('1', 126000000, size - 1000, 1, 1))
+        self.assertNotIn('loss_1p', self.events(engine))
+
+    def test_short_noisy_segment_does_not_break_the_run(self):
+        size = self.genome.CHROM_DICT['1']
+        engine = self.chrom('1', seg_row('1', 1000, 15000000, 0, 1), seg_row('1', 15000001, 16000000, 1, 1),
+                            seg_row('1', 16000001, 32000000, 0, 1), seg_row('1', 32000001, 124000000, 1, 1),
+                            seg_row('1', 126000000, size - 1000, 1, 1))
+        self.assertAlmostEqual(self.events(engine)['loss_1p'].state.terminal[1], 32000001, delta=1)
+
+    def test_half_arm_loss_that_splits_the_whole_arm_call(self):
+        size = self.genome.CHROM_DICT['11']
+        segments = [seg_row('11', 1000, 51000000, 1, 1), seg_row('11', 54000000, 94000000, 1, 1), seg_row('11', 94000001, size - 1000, 0, 1)]
+        self.assertIn('loss_11q', self.events(self.chrom('11', *segments)))
+        self.assertNotIn('loss_11q', self.events(self.chrom('11', *segments, fraction=None)))
+
+    def test_no_second_event_when_the_whole_arm_call_has_it(self):
+        size = self.genome.CHROM_DICT['11']
+        engine = self.chrom('11', seg_row('11', 1000, 51000000, 1, 1), seg_row('11', 54000000, 70000000, 1, 1),
+                            seg_row('11', 70000001, size - 1000, 0, 1))
+        self.assertEqual(len(engine.all_cn_events['loss_11q']), 1)
+        self.assertIsNone(engine.all_cn_events['loss_11q'][0].state.terminal)
+
+    def test_terminal_gain(self):
+        size = self.genome.CHROM_DICT['17']
+        engine = self.chrom('17', seg_row('17', 1000, 22000000, 1, 1), seg_row('17', 25000000, 55000000, 1, 1),
+                            seg_row('17', 55000001, size - 1000, 1, 2))
+        self.assertEqual(self.events(engine)['gain_17q'].Type, 'Arm_gain')
+
+    def test_terminal_states_do_not_vote_for_wgd(self):
+        size = self.genome.CHROM_DICT['1']
+        segments = [seg_row('1', 1000, 30000000, 1, 2), seg_row('1', 30000001, 124000000, 2, 2), seg_row('1', 126000000, size - 1000, 2, 2)]
+        engine = self.chrom('1', *segments, baseline=(2, 2), muts=doubled_arm_muts())
+        self.assertIsNotNone(engine.WGD)
+        self.assertIn('1p' + TERMINAL, engine.concordant_cn_states)
+        for wgd in [engine.WGD] + [sample.WGD for sample in engine.sample_list]:
+            arms = [(state.chrN, state.arm) for state in wgd.supporting_arm_states]
+            self.assertEqual(len(arms), len(set(arms)))
+            self.assertEqual([state for state in wgd.supporting_arm_states if (state.chrN, state.arm) == ('1', 'p')][0].cn_a1, 2.)
+        event = self.events(engine)['loss_1p']
+        self.assertEqual(event.allelic_cn, 1.)
+        self.assertGreater(self.pi_mean(event.pi_dist), self.pi_mean(engine.WGD.pi_dist))
+
+    def test_needs_continuous_cn(self):
+        with self.assertRaises(ValueError):
+            TimingOptions(terminal_arm_min_fraction=.2)
+
+    def test_short_arm_needs_the_minimum_length(self):
+        # 18p is 15 Mb: a quarter of it is 3.75 Mb, shorter than the 5 Mb minimum.
+        size = self.genome.CHROM_DICT['18']
+        segments = [seg_row('18', 1000, 3750000, 0, 1), seg_row('18', 3750001, 15000000, 1, 1), seg_row('18', 17500000, size - 1000, 1, 1)]
+        self.assertNotIn('loss_18p', self.events(self.chrom('18', *segments)))
+        segments[0], segments[1] = seg_row('18', 1000, 6000000, 0, 1), seg_row('18', 6000001, 15000000, 1, 1)
+        self.assertIn('loss_18p', self.events(self.chrom('18', *segments)))
+
+    def test_cli(self):
+        cli = CommandLine('run_cli')
+        cli.tmp, cli.genome = self.tmp, self.genome
+        size = self.genome.CHROM_DICT['1']
+        rows = [r for r in whole_genome(self.genome, male=False) if r[0] != '1']
+        rows += [seg_row('1', 1000, 30000000, 0, 1), seg_row('1', 30000001, 124000000, 1, 1), seg_row('1', 126000000, size - 1000, 1, 1)]
+        flags = ['--sex_aware', '--continuous_cn', '--clonal_unresolved']
+        self.assertEqual(cli.run_cli(rows, 'XX', *flags, '--terminal_arm_events', '0.1').returncode, 0)
+        self.assertIn('loss_1p', set(cli.table()['Event Name']))
+        self.assertEqual(cli.run_cli(rows, 'XX', *flags, '--terminal_arm_events', '0.1', '--terminal_arm_min_length', '40000000').returncode, 0)
+        self.assertNotIn('loss_1p', set(cli.table()['Event Name']))
+        self.assertNotEqual(cli.run_cli(rows, 'XX', '--sex_aware', '--terminal_arm_events', '0.1').returncode, 0)
 
 
 class LeagueInformation(unittest.TestCase):

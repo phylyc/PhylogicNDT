@@ -508,6 +508,21 @@ def build_parser():
                                help='With --sex_aware: time a doubled tumor without Y before its WGD only where the SIF '
                                     'column odds_pre_wgd (loss before the WGD against two losses after it) reaches this. '
                                     'Otherwise, or where the column is empty, the loss stays clonal and unresolved.')
+    timing_parent.add_argument('--terminal_arm_events',
+                               type=float,
+                               action='store',
+                               dest='terminal_arm_events',
+                               default=None,
+                               metavar='MIN_ARM_FRACTION',
+                               help='With --continuous_cn: call a run of segments from an arm end that covers at least this '
+                                    'share of the arm, in one state that the rest of the arm does not hold, as an event of that '
+                                    'arm (loss_1p for 1p36), where the whole-arm call misses it.')
+    timing_parent.add_argument('--terminal_arm_min_length',
+                               type=int,
+                               action='store',
+                               dest='terminal_arm_min_length',
+                               default=5000000,
+                               help='With --terminal_arm_events: the run must also span this many bp.')
     timing_parent.add_argument('--focal_gain_max_length',
                                type=int,
                                action='store',

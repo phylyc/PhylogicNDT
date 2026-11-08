@@ -16,6 +16,8 @@ SEX_LABELS = {'XY': 'male', 'MALE': 'male', 'M': 'male', 'XX': 'female', 'FEMALE
 # Smallest uncertainty assumed for an event's CCF, because purity error moves copy number beyond segment noise.
 MIN_CCF_SD = .05
 Y_COPY_RATIO_FLOOR = .08
+# Key suffix of a terminal partial-arm state, kept beside the whole-arm state of the same arm.
+TERMINAL = ':terminal'
 
 
 class TimingOptions(object):
@@ -39,10 +41,14 @@ class TimingOptions(object):
         it, or without odds, the loss is clonal and unresolved. Parsimony alone is weak when the WGD came early.
     seed: None uses the global random state. A number gives each simulation of detection power its own random state,
         derived from the seed and the event, so a run is reproducible and does not depend on the order events are timed.
+    terminal_arm_min_fraction: None, or the share of an arm a terminal run of segments must cover to be called as an
+        event of that arm when the whole-arm call misses it, as for 1p36 and distal 11q losses. Needs continuous_cn.
+    terminal_arm_min_length: the run must also span this many bp, so that on short arms it is no focal event.
     """
     def __init__(self, sex=None, sex_aware=False, continuous_cn=False, clonal_unresolved=False, segment_homdels=False,
                  y_callable_blocks=Y_CALLABLE_BLOCKS_HG19, cn_event_tol=.2, cn_clonal_min_ccf=.8, wgd_override=None,
-                 loy_wgd_min_odds=None, loy_odds=None, seed=None):
+                 loy_wgd_min_odds=None, loy_odds=None, seed=None, terminal_arm_min_fraction=None,
+                 terminal_arm_min_length=5000000):
         label = SEX_LABELS.get(str(sex).strip().upper())
         if sex_aware and label is None:
             raise ValueError('sex_aware timing requires the sex of the patient, as XY or XX. Got: {!r}'.format(sex))
@@ -58,6 +64,10 @@ class TimingOptions(object):
         self.loy_wgd_min_odds = loy_wgd_min_odds
         self.loy_odds = dict(loy_odds or {})
         self.seed = seed
+        if terminal_arm_min_fraction is not None and not continuous_cn:
+            raise ValueError('Terminal partial-arm events are called from continuous copy number: set continuous_cn.')
+        self.terminal_arm_min_fraction = terminal_arm_min_fraction
+        self.terminal_arm_min_length = terminal_arm_min_length
 
     @property
     def male(self):
@@ -146,9 +156,10 @@ class TimingEngine(object):
         n_samples = len(self.sample_list)
         purity = [sample.purity for sample in self.sample_list]
         self.concordant_cn_states = {}
-        regions = list(self.arm_regions) + ([('Y', '')] if self.options.male else [])
-        for chrN, arm in regions:
-            region = chrN + arm
+        regions = [(chrN, arm, chrN + arm) for chrN, arm in self.arm_regions] + ([('Y', '', 'Y')] if self.options.male else [])
+        if self.options.terminal_arm_min_fraction is not None:
+            regions += [(chrN, arm, chrN + arm + TERMINAL) for chrN, arm in self.arm_regions]
+        for chrN, arm, region in regions:
             states_across_samples = {}  # hold union of all copy number states in all samples
             for sample in self.sample_list:
                 # After WGD a 2/2 arm has no events, but it is the main evidence for timing the WGD itself.
@@ -216,7 +227,8 @@ class TimingEngine(object):
                     if limits:
                         multisample_state.absent_tol = max(limits)
                         multisample_state.call_events()
-                    self.concordant_cn_states[chrN + arm] = multisample_state
+                    multisample_state.terminal = states_across_samples[state][0].terminal
+                    self.concordant_cn_states[region] = multisample_state
 
     def call_wgd(self, concordance_threshold=.8, tol=.2):  # TODO: try other concordance thresholds
         """
@@ -1157,6 +1169,9 @@ class TimingSample(object):
                 states_over_threshold = [] if call is None else [call[0]]
                 if call is not None:
                     continuous, continuous_sd = call[1], call[2]
+            if arm_bp >= true_arm_bp * .5 and self.options.terminal_arm_min_fraction is not None:
+                self._add_terminal_state(chrN, arm, start, end, arm_segments, None if call is None else call[1],
+                                         concordant_states)
             if arm_bp < true_arm_bp * .5:  # Only call if at least 50% of arm is in segs
                 self.missing_arms.append((chrN, arm))
             elif len(states_over_threshold) == 1:
@@ -1182,6 +1197,85 @@ class TimingSample(object):
                     self.cn_states['Y'] = y_state
                 elif 'Y' in concordant_states:
                     self.concordant_cn_states['Y'] = y_state
+
+    def _add_terminal_state(self, chrN, arm, start, end, arm_segments, arm_center, concordant_states):
+        """Keep a terminal run that the whole-arm call missed as its own state of this arm, under region + TERMINAL."""
+        call = self._terminal_arm_state(arm_segments, arm, start, end, self.options.is_hemizygous(chrN))
+        if call is None or call['fraction'] < self.options.terminal_arm_min_fraction or \
+                call['span'][1] - call['span'][0] < self.options.terminal_arm_min_length:
+            return
+        tol = self.options.cn_event_tol
+        if arm_center is not None and all(abs(a - b) <= tol for a, b in zip(arm_center, call['center'])):
+            return  # the whole-arm call is this state already
+        region = chrN + arm + TERMINAL
+        lo, hi = call['span']
+        cn_a1, cn_a2 = call['state']
+        if concordant_states is None:
+            tree = self.mutation_intervaltree[chrN]
+        elif region in concordant_states:
+            tree = self.concordant_mutation_intervaltree[chrN]
+        else:
+            return
+        supporting_muts = [interval.data for interval in tree[lo:hi]
+                           if interval.data.local_cn_a1 == cn_a1 and interval.data.local_cn_a2 == cn_a2]
+        state = TimingCNState([self], chrN, arm, (cn_a1, cn_a2), [self.purity], supporting_muts=supporting_muts,
+                              continuous=call['center'], continuous_sd=call['sd'])
+        state.terminal = (lo, hi)
+        if concordant_states is None:
+            self.cn_states[region] = state
+        else:
+            self.concordant_cn_states[region] = state
+
+    def _terminal_arm_state(self, segments, arm, start, end, hemizygous=False, min_purity=.9, max_gap=.1):
+        """
+        The longest run of segments from the telomeric end of an arm that holds one state, if the rest of the arm differs.
+
+        Neuroblastoma's 1p and 11q losses are mostly terminal (1p36, 11q14-qter), and short of 40% of the arm the
+        whole-arm call reads the normal remainder. A run holds one state if segments within the tolerance of its
+        length-weighted median cover min_purity of its length, so short noisy segments do not break it, and it ends on
+        such a segment. The rest of the arm must differ by more than the tolerance on one allele. The run must start
+        within max_gap of the arm's length from the arm end. Returns None, or a dict with the modal state, the
+        continuous center and its uncertainty, the span in bp, and the share of the arm the span covers.
+        """
+        if len(segments) < 2:
+            return None
+        tol = self.options.cn_event_tol
+        order = sorted(segments, key=lambda item: item[0].begin, reverse=(arm == 'q'))
+        arm_length = float(end - start)
+        first = order[0][0]
+        if (first.begin - start if arm == 'p' else end - first.end) > max_gap * arm_length:
+            return None
+        lengths = np.array([length for _, length in order], dtype=float)
+        rows = [self.sample.allele_copy_number(seg.data[1]) for seg, _ in order]
+        modal = [(seg.data[1]['cn_a1'], seg.data[1]['cn_a2']) for seg, _ in order]
+        a1 = np.array([row[0] for row in rows], dtype=float)
+        a2 = np.array([row[1] for row in rows], dtype=float)
+        a1 = np.where(np.isfinite(a1), a1, [m[0] for m in modal])
+        a2 = np.where(np.isfinite(a2), a2, [m[1] for m in modal])
+        noise = self.sample.copy_ratio_line()[0] / (2. if hemizygous else np.sqrt(2.))
+        sd = np.array([_number(seg.data[1].get('seg_sigma')) * noise for seg, _ in order], dtype=float)
+        best = None
+        for k in range(1, len(order)):
+            center = (_weighted_median(a1[:k], lengths[:k]), _weighted_median(a2[:k], lengths[:k]))
+            inside = (np.abs(a1[:k] - center[0]) <= tol) & (np.abs(a2[:k] - center[1]) <= tol)
+            if not inside[-1] or lengths[:k][inside].sum() < min_purity * lengths[:k].sum():
+                continue
+            rest = (_weighted_median(a1[k:], lengths[k:]), _weighted_median(a2[k:], lengths[k:]))
+            if all(abs(r - c) <= tol for r, c in zip(rest, center)):
+                continue
+            best = (k, center, inside)
+        if best is None:
+            return None
+        k, center, inside = best
+        inner = order[k - 1][0]
+        span = (start, min(inner.end, end)) if arm == 'p' else (max(inner.begin, start), end)
+        by_state = Counter()
+        for index in np.flatnonzero(inside):
+            by_state[modal[index]] += lengths[index]
+        weights = lengths[:k][inside] / lengths[:k][inside].sum()
+        sds = tuple(float(np.sqrt(np.nansum((weights * sd[:k][inside]) ** 2))) for _ in range(2))
+        return {'state': by_state.most_common(1)[0][0], 'center': center, 'sd': sds, 'span': span,
+                'fraction': (span[1] - span[0]) / arm_length}
 
     def _call_y_state(self, min_callable_fraction=.5):
         """Whole-chromosome chrY state over callable territory. None if too little of that territory is segmented."""
@@ -1223,7 +1317,7 @@ class TimingSample(object):
             if self.WGD is None:
                 return
             for cn_state in self.concordant_cn_states.values():
-                if cn_state.cn_type_prefix == 'Chrom':
+                if cn_state.cn_type_prefix == 'Chrom' or cn_state.terminal is not None:
                     continue
                 if cn_state.cn_a1 == 0 or cn_state.cn_a1 >= 2 and cn_state.cn_a2 >= 2:  # region supports WGD if 0/2 or 2/2
                     supporting_arm_states.append(TimingCNState([self], cn_state.chrN, cn_state.arm,
@@ -1233,7 +1327,7 @@ class TimingSample(object):
                 cn_state.call_events(wgd=True)
         else:
             for cn_state in self.cn_states.values():
-                if cn_state.cn_type_prefix == 'Chrom':
+                if cn_state.cn_type_prefix == 'Chrom' or cn_state.terminal is not None:
                     continue
                 if cn_state.cn_a2 >= 2:
                     supporting_arm_states.append(cn_state)
@@ -1339,6 +1433,7 @@ class TimingCNState(object):
         self.continuous = continuous  # (a1, a2) continuous copy number, or None to use the integer state
         self.continuous_sd = continuous_sd
         self.absent_tol = None
+        self.terminal = None  # (start, end) of a terminal partial-arm run, see TimingSample._terminal_arm_state
         self.haploid = self.options.is_hemizygous(chrN)
         self.cn_events = None
         self.call_events(cn_type_prefix=cn_type_prefix)
