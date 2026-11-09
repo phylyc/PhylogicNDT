@@ -322,7 +322,8 @@ def compare_event_list(all_events, uncertainty_bins=5, uniform_atol=1e-6):
     by the side of the WGD each lies on: event 1 first with q1 * (1 - q2),
     event 2 first with q2 * (1 - q1), unknown otherwise. Their distributions,
     one copy of the WGD's each, would otherwise read as a game. Pairs with the
-    WGD itself, or with one anchored event only, compare as before.
+    WGD itself, or with one anchored event only, compare as before, and an
+    event with an uninformative distribution stays unknown against all.
 
     When multiple CN events share the same ``event_name`` (e.g. two
     gains from a 2/2 arm state), only the event with the most supporting
@@ -365,16 +366,17 @@ def compare_event_list(all_events, uncertainty_bins=5, uniform_atol=1e-6):
         if status1 == 'subclonal' and status2 == 'clonal_unresolved':
             comps[(eve1.event_name, eve2.event_name)] = (0.0, 1.0, 0.0)
             continue
+        # Either event has no informative timing → fully unknown. This holds for an anchored event too: a
+        # multiplicity-1 SNV on 1/2 has a uniform distribution, whatever its q.
+        if _is_uninformative(eve1.pi_dist) or _is_uninformative(eve2.pi_dist):
+            comps[(eve1.event_name, eve2.event_name)] = (0.0, 0.0, 1.0)
+            continue
+
         # Two events anchored on the WGD are ordered only by which side of it each lies on: q is the probability of
         # preceding it. Two events the WGD rule places on one side therefore score (0, 0, 1).
         q1, q2 = _p_before_wgd(eve1), _p_before_wgd(eve2)
         if q1 is not None and q2 is not None:
             comps[(eve1.event_name, eve2.event_name)] = (q1 * (1. - q2), q2 * (1. - q1), q1 * q2 + (1. - q1) * (1. - q2))
-            continue
-
-        # Either event has no informative timing → fully unknown.
-        if _is_uninformative(eve1.pi_dist) or _is_uninformative(eve2.pi_dist):
-            comps[(eve1.event_name, eve2.event_name)] = (0.0, 0.0, 1.0)
             continue
 
         p1 = np.asarray(eve1.pi_dist, dtype=float)

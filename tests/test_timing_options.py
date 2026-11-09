@@ -1301,6 +1301,29 @@ class WgdAnchoredPairs(TimingCase):
         self.assertEqual(comps[('WGD', 'snv')], spt.compare_event_list([spt.TimedEvent('WGD', wgd), spt.TimedEvent('snv', snv)])[('WGD', 'snv')])
         self.assertEqual(comps[('snv', 'gain_timed')], spt.compare_event_list([spt.TimedEvent('snv', snv), spt.TimedEvent('gain_timed', after)])[('snv', 'gain_timed')])
 
+    def test_uniform_distribution_stays_unknown(self):
+        # A multiplicity-1 SNV on 1/2 has p_before = p_after: its distribution is uniform, its q only the WGD's weight.
+        grid = np.linspace(0, 1, 101)
+        wgd = np.exp(-((grid - .4) ** 2) / .002)
+        wgd /= wgd.sum()
+        before = 1 - np.cumsum(wgd)
+        comps = spt.compare_event_list([spt.TimedEvent('loss_Y', before / before.sum(), 'estimated', 'before', 1.),
+                                        spt.TimedEvent('snv', np.ones(101) / 101, 'estimated', None, .41)])
+        self.assertEqual(comps[('loss_Y', 'snv')], (0.0, 0.0, 1.0))
+
+    def test_multiplicity_one_on_one_two_is_unknown_in_the_engine(self):
+        rows = [r for r in whole_genome(self.genome, male=True, baseline=(2, 2)) if r[0] != '17'] + y_rows(0.)
+        rows += [seg_row('17', 1000, 22000000, 0, 2), seg_row('17', 25000000, 81000000, 1, 2)]
+        depth = 100
+        alt = int(depth * PURITY / (3 * PURITY + 2 * (1 - PURITY)))
+        muts = doubled_arm_muts() + [('17', 40000000 + i * 1000, 1, 'A', depth - alt, alt) for i in range(3)]
+        engine = self.run_engine(rows, muts=muts, options=TimingOptions(sex='XY', **ALL_ON))
+        snvs = [m for m in engine.mutations.values() if m.chrN == '17' and m.pos >= 40000000]
+        self.assertTrue(all(m.p_before_wgd is not None for m in snvs))
+        comps = spt.compare_events(engine, drivers=[snvs[0].gene])
+        pair = next(key for key in comps if 'loss_Y' in key and snvs[0].event_name in key)
+        self.assertEqual(comps[pair], (0.0, 0.0, 1.0))
+
     def test_snvs_get_their_probability_from_multiplicity(self):
         engine = self.doubled()
         timed = [mut for mut in engine.mutations.values() if mut.pi_dist is not None and mut.is_clonal]
