@@ -2066,9 +2066,11 @@ class TimingMut(object):
             return
 
         pi_cdf = np.cumsum(matched_gain.pi_dist)
-        # The probability of preceding the gain under this model: the before-weight of the distribution built below.
-        # Each bin holds (1 - cdf) p_before + cdf p_after, so the gain's timing weighs the two sides by
-        # sum(1 - cdf) and sum(cdf), and the samples' evidence multiplies as their distributions do.
+        # The probability of preceding the gain under this model, for one time shared by all samples: the gain's
+        # timing weighs the two sides by A = sum(1 - cdf) and B = sum(cdf), so q = A prod(p_before) / (A prod(p_before)
+        # + B prod(p_after)). For one sample this is exactly the before-weight of the distribution built below, whose
+        # bins hold (1 - cdf) p_before + cdf p_after. For several samples that distribution multiplies the per-sample
+        # mixtures bin by bin, which is close to, but not exactly, a two-component mixture with weight q.
         log_before = np.log(max(np.sum(np.clip(1. - pi_cdf, 0., None)), 1e-300))
         log_after = np.log(max(np.sum(np.clip(pi_cdf, 0., None)), 1e-300))
         log_before += np.sum(np.log(np.clip(p_before[mask], 1e-300, 1.)))
