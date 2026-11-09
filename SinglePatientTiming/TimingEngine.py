@@ -138,6 +138,15 @@ class TimingEngine(object):
             return None
         return True
 
+    def _focal_gain_windows(self):
+        """{chromosome: [(start, end)]} of the focal gains called, by their windows."""
+        windows = defaultdict(list)
+        for events in self.all_cn_events.values():
+            for event in events:
+                if event.Type == 'Focal_gain' and event.start is not None and event.end is not None:
+                    windows[str(event.chrN)].append((int(event.start), int(event.end)))
+        return windows
+
     def _loy_before_wgd_unsupported(self, event):
         """True if the WGD rule would place this loss of Y before the WGD while the odds given do not support it."""
         if self.options.loy_wgd_min_odds is None or event.Type != 'Chrom_loss' or str(event.chrN) != 'Y' \
@@ -901,8 +910,13 @@ class TimingEngine(object):
             else:
                 self.WGD.timing_status = 'estimated'
 
+            # As a focal gain is placed against the WGD by no copy number, neither are the mutations it carries.
+            amplified = self._focal_gain_windows() if self.options.continuous_cn else {}
             for mut in self.mutations.values():
                 if mut.is_clonal:
+                    if any(start <= mut.pos < end for start, end in amplified.get(str(mut.chrN), ())):
+                        mut.timing_reason = 'amplicon_vs_wgd'
+                        continue
                     mut.get_pi_dist(self.WGD)
                     if self.options.clonal_unresolved and mut.pi_dist is not None:
                         # Its multiplicity places it before or after the WGD: the order against other such events.

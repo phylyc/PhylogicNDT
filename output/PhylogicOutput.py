@@ -1295,7 +1295,7 @@ class PhylogicOutput(object):
                         mut.local_cn_a1, mut.local_cn_a2, '', pi_mean, pi_low, pi_high]
                 line.extend(pi_dist)
                 if extended:
-                    line.extend([mut.timing_status or '', mut.is_clonal, '', '', '', '', '', '',
+                    line.extend([mut.timing_status or '', mut.is_clonal, '', '', '', '', '', getattr(mut, 'timing_reason', None) or '',
                                  '' if mut.p_before_wgd is None else mut.p_before_wgd])
                 f.write('\n' + '\t'.join(map(str, line)))
         if timing_engine.WGD is not None:
