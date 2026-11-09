@@ -4,7 +4,7 @@ import itertools
 from intervaltree import IntervalTree, Interval
 import scipy.stats
 import scipy.interpolate
-from scipy.special import logsumexp
+from scipy.special import expit, logsumexp
 import random
 import zlib
 import data.Enums as Enums
@@ -904,6 +904,9 @@ class TimingEngine(object):
             for mut in self.mutations.values():
                 if mut.is_clonal:
                     mut.get_pi_dist(self.WGD)
+                    if self.options.clonal_unresolved and mut.pi_dist is not None:
+                        # Its multiplicity places it before or after the WGD: the order against other such events.
+                        mut.p_before_wgd = mut.p_before_gain
 
             for evs in self.all_cn_events.values():
                 for cn_event in evs:
@@ -948,6 +951,7 @@ class TimingEngine(object):
                     if self.options.clonal_unresolved and cn_event.timing_source == 'wgd_rule':
                         # Events the rule puts on one side of the WGD share one distribution, which orders neither.
                         cn_event.wgd_side = cn_event.rule_side
+                        cn_event.p_before_wgd = 1. if cn_event.rule_side == 'before' else 0.
 
         # ------------------------------------------------------------------
         # No-WGD path
@@ -1668,6 +1672,7 @@ class TimingCNEvent(object):
         self.high_level = False  # a focal amplification far above its arm, see Patient._continuous_focal_call
         self.rule_side = None  # 'before' or 'after' the WGD, when the WGD rule placed the event there
         self.wgd_side = None  # rule_side, kept with clonal_unresolved: two events on one side cannot be ordered
+        self.p_before_wgd = None  # 1 or 0 with wgd_side: the probability that the event preceded the WGD
 
 
     def __repr__(self):
@@ -1925,6 +1930,8 @@ class TimingMut(object):
         self.mult_lik_dict = {}
         self.log_mult_dist = None
         self.timing_status = None
+        self.p_before_gain = None  # probability of preceding the gain last timed against, from multiplicity
+        self.p_before_wgd = None  # p_before_gain when that gain is the WGD, kept with clonal_unresolved
 
     def __eq__(self, other):
         if not isinstance(other, TimingMut):
@@ -2043,6 +2050,11 @@ class TimingMut(object):
         mask = ~np.isnan(p_before)
         if not mask.any():
             return
+
+        # The samples' evidence on before against after multiplies, as their distributions do below.
+        log_before = np.sum(np.log(np.clip(p_before[mask], 1e-300, 1.)))
+        log_after = np.sum(np.log(np.clip(p_after[mask], 1e-300, 1.)))
+        self.p_before_gain = float(expit(log_before - log_after))
 
         pi_cdf = np.cumsum(matched_gain.pi_dist)
         pi_dist = np.outer(1.0 - pi_cdf, p_before[mask]) + np.outer(pi_cdf, p_after[mask])

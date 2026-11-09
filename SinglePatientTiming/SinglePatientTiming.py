@@ -8,7 +8,8 @@ from LeagueModel.LeagueModelData import event_matches_selector, parse_harmonized
 from SinglePatientTiming import TimingEngine
 from output.PhylogicOutput import PhylogicOutput
 
-TimedEvent = namedtuple('TimedEvent', ['event_name', 'pi_dist', 'timing_status', 'wgd_side'], defaults=(None, None))
+TimedEvent = namedtuple('TimedEvent', ['event_name', 'pi_dist', 'timing_status', 'wgd_side', 'p_before_wgd'],
+                        defaults=(None, None, None))
 # Which row to keep when alleles share an event name. Only tables written with the new options have statuses.
 PI_GRID = np.linspace(0, 1, 101)
 STATUS_RANK = {'subclonal': 1, 'ambiguous_clonality': 2, 'clonal_unresolved': 3, 'prior_only': 4, 'estimated': 5}
@@ -162,6 +163,7 @@ def read_timed_events(timing_tsv, event_file=None, compare_all=False):
     class_col = class_cols[0] if class_cols else None
     has_status = 'timing_status' in timing_df.columns
     has_side = 'wgd_side' in timing_df.columns
+    has_q = 'p_before_wgd' in timing_df.columns
 
     if event_file:
         with open(event_file) as f:
@@ -189,21 +191,23 @@ def read_timed_events(timing_tsv, event_file=None, compare_all=False):
         pi_dist = None if np.isnan(pi).all() else pi
         status = row['timing_status'] if has_status and isinstance(row['timing_status'], str) else None
         side = row['wgd_side'] if has_side and isinstance(row['wgd_side'], str) and row['wgd_side'] else None
+        q = pd.to_numeric(row['p_before_wgd'], errors='coerce') if has_q else np.nan
+        q = float(q) if np.isfinite(q) else None
 
         if event_name in timing_by_event:
             duplicate_event_counts[event_name] = duplicate_event_counts.get(event_name, 1) + 1
-            prev_pi_dist, prev_event_class, prev_status, prev_side = timing_by_event[event_name]
+            prev_pi_dist, prev_event_class, prev_status, prev_side, prev_q = timing_by_event[event_name]
             rank, prev_rank = STATUS_RANK.get(status, 0), STATUS_RANK.get(prev_status, 0)
             earlier = (rank == prev_rank > 0 and pi_dist is not None and prev_pi_dist is not None
                        and float(np.dot(pi_dist, PI_GRID)) < float(np.dot(prev_pi_dist, PI_GRID)))
             if rank > prev_rank or earlier:
                 # Two alleles can share a name. The event happened no later than its earliest step.
-                timing_by_event[event_name] = (pi_dist, event_class or prev_event_class, status, side)
+                timing_by_event[event_name] = (pi_dist, event_class or prev_event_class, status, side, q)
             elif prev_pi_dist is None and pi_dist is not None and prev_status is None:
-                timing_by_event[event_name] = (pi_dist, event_class or prev_event_class, status, side)
+                timing_by_event[event_name] = (pi_dist, event_class or prev_event_class, status, side, q)
             continue
 
-        timing_by_event[event_name] = (pi_dist, event_class, status, side)
+        timing_by_event[event_name] = (pi_dist, event_class, status, side, q)
 
     if duplicate_event_counts:
         duplicate_msg = ', '.join(
@@ -217,7 +221,8 @@ def read_timed_events(timing_tsv, event_file=None, compare_all=False):
         )
 
     if compare_all and not event_file:
-        return [TimedEvent(event_name, pi_dist, status, side) for event_name, (pi_dist, _, status, side) in timing_by_event.items()]
+        return [TimedEvent(event_name, pi_dist, status, side, q)
+                for event_name, (pi_dist, _, status, side, q) in timing_by_event.items()]
 
     events = []
     selected_raw_events = set()
@@ -225,9 +230,9 @@ def read_timed_events(timing_tsv, event_file=None, compare_all=False):
     class_selectors_without_classes = []
     for selector in selected_events:
         matched_events = []
-        for event_name, (pi_dist, event_class, status, side) in timing_by_event.items():
+        for event_name, (pi_dist, event_class, status, side, q) in timing_by_event.items():
             if event_matches_selector(event_name, selector, event_class=event_class):
-                matched_events.append((event_name, pi_dist, status, side))
+                matched_events.append((event_name, pi_dist, status, side, q))
 
         if not matched_events:
             missing_selectors.append(selector)
@@ -236,10 +241,10 @@ def read_timed_events(timing_tsv, event_file=None, compare_all=False):
         if parse_harmonized_point_event(selector) is not None and class_col is None:
             class_selectors_without_classes.append(selector)
 
-        for event_name, pi_dist, status, side in matched_events:
+        for event_name, pi_dist, status, side, q in matched_events:
             if event_name in selected_raw_events:
                 continue
-            events.append(TimedEvent(event_name, pi_dist, status, side))
+            events.append(TimedEvent(event_name, pi_dist, status, side, q))
             selected_raw_events.add(event_name)
 
     if missing_selectors:
@@ -277,6 +282,14 @@ def _dedup_cn_events(cn_events_dict):
     return [ev for ev, _ in seen.values()]
 
 
+def _p_before_wgd(event):
+    """The probability that an event anchored on the WGD preceded it, or None. Tables with sides only give 1 or 0."""
+    q = getattr(event, 'p_before_wgd', None)
+    if q is not None and np.isfinite(q):
+        return float(q)
+    return {'before': 1., 'after': 0.}.get(getattr(event, 'wgd_side', None))
+
+
 def compare_event_list(all_events, uncertainty_bins=5, uniform_atol=1e-6):
     """Compare event timings using pairwise probabilities from the joint
     distribution over discrete pi bins.
@@ -303,6 +316,13 @@ def compare_event_list(all_events, uncertainty_bins=5, uniform_atol=1e-6):
 
     Note: the ``subclonal_dist`` (a delta at bin 100, "after everything")
     is *not* uniform and remains informative.
+
+    Two events anchored on the WGD (a probability ``p_before_wgd`` of
+    preceding it, or a ``wgd_side``), neither the WGD itself, are ordered only
+    by the side of the WGD each lies on: event 1 first with q1 * (1 - q2),
+    event 2 first with q2 * (1 - q1), unknown otherwise. Their distributions,
+    one copy of the WGD's each, would otherwise read as a game. Pairs with the
+    WGD itself, or with one anchored event only, compare as before.
 
     When multiple CN events share the same ``event_name`` (e.g. two
     gains from a 2/2 arm state), only the event with the most supporting
@@ -345,10 +365,11 @@ def compare_event_list(all_events, uncertainty_bins=5, uniform_atol=1e-6):
         if status1 == 'subclonal' and status2 == 'clonal_unresolved':
             comps[(eve1.event_name, eve2.event_name)] = (0.0, 1.0, 0.0)
             continue
-        # Two events the WGD rule placed on one side of the WGD share one distribution, which orders neither.
-        side1, side2 = getattr(eve1, 'wgd_side', None), getattr(eve2, 'wgd_side', None)
-        if side1 is not None and side1 == side2:
-            comps[(eve1.event_name, eve2.event_name)] = (0.0, 0.0, 1.0)
+        # Two events anchored on the WGD are ordered only by which side of it each lies on: q is the probability of
+        # preceding it. Two events the WGD rule places on one side therefore score (0, 0, 1).
+        q1, q2 = _p_before_wgd(eve1), _p_before_wgd(eve2)
+        if q1 is not None and q2 is not None:
+            comps[(eve1.event_name, eve2.event_name)] = (q1 * (1. - q2), q2 * (1. - q1), q1 * q2 + (1. - q1) * (1. - q2))
             continue
 
         # Either event has no informative timing → fully unknown.

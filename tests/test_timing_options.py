@@ -22,7 +22,7 @@ from data.Patient import Patient
 from LeagueModel.LeagueModelData import League
 from output.PhylogicOutput import PhylogicOutput
 from SinglePatientTiming import SinglePatientTiming as spt
-from SinglePatientTiming.TimingEngine import TimingEngine, TimingOptions, TERMINAL, Y_CALLABLE_BLOCKS_HG19
+from SinglePatientTiming.TimingEngine import TimingEngine, TimingMut, TimingOptions, TERMINAL, Y_CALLABLE_BLOCKS_HG19
 
 ALL_ON = dict(sex_aware=True, continuous_cn=True, clonal_unresolved=True, segment_homdels=True)
 SEG_COLUMNS = ['Chromosome', 'Start.bp', 'End.bp', 'n_probes', 'seg_sigma', 'total_copy_ratio', 'rescaled_total_cn',
@@ -1266,6 +1266,107 @@ class SameSideOfWgd(TimingCase):
         comps = spt.compare_events(engine)
         pair = ('loss_Y', 'loss_17p') if ('loss_Y', 'loss_17p') in comps else ('loss_17p', 'loss_Y')
         self.assertEqual(comps[pair], (0.0, 0.0, 1.0))
+
+
+class WgdAnchoredPairs(TimingCase):
+    """Extension of fix 6: SNVs timed against the WGD carry their probability of preceding it, as rule events do."""
+    def doubled(self):
+        rows = [r for r in whole_genome(self.genome, male=True, baseline=(2, 2)) if r[0] != '17'] + y_rows(0.)
+        rows += [seg_row('17', 1000, 22000000, 0, 2), seg_row('17', 25000000, 81000000, 1, 2)]
+        return self.run_engine(rows, muts=doubled_arm_muts(), options=TimingOptions(sex='XY', **ALL_ON))
+
+    def test_rule(self):
+        grid = np.linspace(0, 1, 101)
+        wgd = np.exp(-((grid - .4) ** 2) / .002)
+        wgd /= wgd.sum()
+        before, after = 1 - np.cumsum(wgd), np.cumsum(wgd)
+        before, after = before / before.sum(), after / after.sum()
+        snv = before * .9 + after * .1
+        comps = spt.compare_event_list([
+            spt.TimedEvent('WGD', wgd, 'estimated'),
+            spt.TimedEvent('loss_Y', before, 'estimated', 'before', 1.),
+            spt.TimedEvent('loss_17q', after, 'estimated', 'after', 0.),
+            spt.TimedEvent('snv', snv, 'estimated', None, .9),
+            spt.TimedEvent('old_table', before, 'estimated', 'before'),
+            spt.TimedEvent('gain_timed', after, 'estimated'),
+        ])
+        self.assertEqual(comps[('loss_Y', 'loss_17q')], (1.0, 0.0, 0.0))
+        self.assertEqual(comps[('loss_Y', 'old_table')], (0.0, 0.0, 1.0))
+        for got, expected in zip(comps[('loss_Y', 'snv')], (.1, 0., .9)):
+            self.assertAlmostEqual(got, expected)
+        for got, expected in zip(comps[('loss_17q', 'snv')], (0., .9, .1)):
+            self.assertAlmostEqual(got, expected)
+        # Against the WGD itself, and against an event without an anchor, the distributions decide as before.
+        self.assertGreater(comps[('WGD', 'loss_Y')][1], .8)
+        self.assertEqual(comps[('WGD', 'snv')], spt.compare_event_list([spt.TimedEvent('WGD', wgd), spt.TimedEvent('snv', snv)])[('WGD', 'snv')])
+        self.assertEqual(comps[('snv', 'gain_timed')], spt.compare_event_list([spt.TimedEvent('snv', snv), spt.TimedEvent('gain_timed', after)])[('snv', 'gain_timed')])
+
+    def test_snvs_get_their_probability_from_multiplicity(self):
+        engine = self.doubled()
+        timed = [mut for mut in engine.mutations.values() if mut.pi_dist is not None and mut.is_clonal]
+        self.assertTrue(timed)
+        # On a 2/2 arm, multiplicity 2 (alt fraction 0.444) means before the doubling, multiplicity 1 after it.
+        early = [m.p_before_wgd for m in timed if m.alt_cnt[0] / (m.alt_cnt[0] + m.ref_cnt[0]) > .4]
+        late = [m.p_before_wgd for m in timed if m.alt_cnt[0] / (m.alt_cnt[0] + m.ref_cnt[0]) < .3]
+        self.assertTrue(early and late)
+        self.assertGreater(min(early), .9)
+        self.assertLess(max(late), .1)
+        events = self.events(engine)
+        self.assertEqual((events['loss_Y'].p_before_wgd, events['loss_17p'].p_before_wgd), (1., 1.))
+
+    def test_samples_combine_as_their_distributions_do(self):
+        class Sample(object):
+            def __init__(self):
+                self.purity, self.options, self.sample_name = PURITY, TimingOptions(), 'S'
+
+        class Gain(object):
+            pi_dist = np.ones(101) / 101
+
+        def mut(n_samples, alt=26, ref=54):
+            mut = TimingMut([Sample() for _ in range(n_samples)], 'G', '1', 100, 'T', 'A', np.full(n_samples, alt),
+                            np.full(n_samples, ref), np.full(n_samples, 2.), np.full(n_samples, 2.),
+                            np.tile(clonal_grid(), (n_samples, 1)))
+            mut.get_pi_dist(Gain())
+            return mut.p_before_gain
+        one, two = mut(1), mut(2)
+        self.assertTrue(.05 < one < .95)
+        self.assertAlmostEqual(two, one ** 2 / (one ** 2 + (1 - one) ** 2))
+
+    def test_table_round_trip(self):
+        engine = self.doubled()
+        os.chdir(self.tmp)
+        self.addCleanup(os.chdir, self.cwd)
+        PhylogicOutput().write_timing_tsv(engine)
+        table = pd.read_csv('P1.timing.tsv', sep='\t', low_memory=False)
+        snvs = table[table['Start_position'].notna()]
+        timed = snvs[snvs['timing_status'] == 'estimated']
+        self.assertTrue(timed['p_before_wgd'].notna().all())
+        self.assertTrue(snvs[snvs['timing_status'] != 'estimated']['p_before_wgd'].isna().all())
+        self.assertTrue(pd.isna(table.set_index('Event Name').loc['WGD', 'p_before_wgd']))
+        events = {e.event_name: e for e in spt.read_timed_events('P1.timing.tsv', compare_all=True)}
+        snv = next(e for name, e in events.items() if not name.startswith(('gain', 'loss', 'WGD')) and e.p_before_wgd is not None)
+        self.assertEqual(events['loss_Y'].p_before_wgd, 1.)
+        comps = spt.compare_event_list([events['loss_Y'], snv])
+        q = snv.p_before_wgd
+        for got, expected in zip(comps[('loss_Y', snv.event_name)], (1. - q, 0., q)):
+            self.assertAlmostEqual(got, expected)
+
+    def test_the_winning_row_keeps_its_probability(self):
+        grid = np.linspace(0, 1, 101)
+        def row(center):
+            pi = np.exp(-((grid - center) ** 2) / .002)
+            return list(pi / pi.sum())
+        columns = ['Event Name'] + [f'pi_{float(x) / 100}' for x in range(101)] + ['timing_status', 'wgd_side', 'p_before_wgd']
+        pd.DataFrame([['loss_17p'] + row(.8) + ['estimated', 'after', 0.], ['loss_17p'] + row(.2) + ['estimated', 'before', 1.]],
+                     columns=columns).to_csv(os.path.join(self.tmp, 'dup.tsv'), sep='\t', index=False)
+        event = spt.read_timed_events(os.path.join(self.tmp, 'dup.tsv'), compare_all=True)[0]
+        self.assertEqual((event.wgd_side, event.p_before_wgd), ('before', 1.))
+
+    def test_without_clonal_unresolved_nothing_is_recorded(self):
+        rows = whole_genome(self.genome, male=False, baseline=(2, 2))
+        engine = self.run_engine(rows, muts=doubled_arm_muts(), options=TimingOptions(sex='XX', sex_aware=True, continuous_cn=True))
+        self.assertTrue(any(mut.pi_dist is not None for mut in engine.mutations.values()))
+        self.assertTrue(all(mut.p_before_wgd is None for mut in engine.mutations.values()))
 
 
 class LoyOdds(TimingCase):
