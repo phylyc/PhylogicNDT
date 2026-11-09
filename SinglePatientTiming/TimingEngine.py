@@ -701,9 +701,9 @@ class TimingEngine(object):
         gain. In every sample, both arms must hold the same modal state and finite continuous values within the
         tolerance, and the event must be on the same allele of both. The patient-level states cannot decide this: each
         of their values comes from whichever sample is closest to the integer state. The event's mutations are those of
-        both arms and its CCF the lower of the two, and it is clonal only if both are. Acrocentric chromosomes have no
-        called p arm and keep their q-arm names. Terminal partial-arm states are left alone, and so is chrY, which is
-        one event already.
+        both arms and its CCF the lower of the two. It is subclonal if either arm is, unknown if neither is but one is
+        unknown, and clonal only if both are. Acrocentric chromosomes have no called p arm and keep their q-arm names.
+        Terminal partial-arm states are left alone, and so is chrY, which is one event already.
         """
         tol = self.options.cn_event_tol
 
@@ -745,8 +745,9 @@ class TimingEngine(object):
                 pair = (p_event, q_event)
                 lower = min(pair, key=lambda e: -1. if e.ccf_hat is None else e.ccf_hat)
                 event.ccf_hat = lower.ccf_hat
+                subclonal = any(not e.is_clonal and not e.clonality_ambiguous for e in pair)
                 event.is_clonal = bool(p_event.is_clonal and q_event.is_clonal)
-                event.clonality_ambiguous = not event.is_clonal and any(e.clonality_ambiguous for e in pair)
+                event.clonality_ambiguous = not subclonal and not event.is_clonal
                 event.merged_arms = pair
                 for events in (self.all_cn_events, self.truncal_cn_events):
                     for arm_event in pair:

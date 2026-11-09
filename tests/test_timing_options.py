@@ -1474,6 +1474,22 @@ class WholeChromosomeEvents(TimingCase):
         engine = self.run_samples([('S1', rows(2.), (), PURITY), ('S2', rows(2.), (), PURITY)], options=options)
         self.assertTrue(self.events(engine)['gain_17'].is_clonal)
 
+    def test_a_subclonal_arm_makes_it_subclonal(self):
+        def merged(p_q2, q_q2):
+            rows = [r for r in whole_genome(self.genome, male=False) if r[0] != '17']
+            rows += [seg_row('17', 1000, 22000000, 1, 2, q2=p_q2), seg_row('17', 25000000, 81000000, 1, 2, q2=q_q2)]
+            return self.events(self.engine(rows))['gain_17']
+        # 17p subclonal at 0.55, 17q too close to the cutoff to tell at 0.72.
+        event = merged(1.55, 1.72)
+        self.assertEqual(event.timing_status, 'subclonal')
+        self.assertFalse(event.clonality_ambiguous)
+        self.assertAlmostEqual(event.ccf_hat, .55)
+        # 17p clonal, 17q unknown at 0.85: unknown.
+        event = merged(2., 1.85)
+        self.assertEqual(event.timing_status, 'ambiguous_clonality')
+        self.assertTrue(event.clonality_ambiguous)
+        self.assertFalse(event.is_clonal)
+
     def test_values_must_be_finite(self):
         engine = self.engine(self.seventeen((1, 2), (1, 2)), whole=False)
         p = engine.concordant_cn_states['17p']
