@@ -1048,8 +1048,20 @@ class WgdOverride(TimingCase):
         self.assertIn('gain_1p', self.events(engine))
 
     def test_other_samples_keep_the_rule(self):
-        engine = self.run_engine(self.partly_doubled(), muts=doubled_arm_muts(), options=self.options({'S2': True}))
+        # Only S2 is given. It doubles; S1 keeps its rule, which says no here, so the patient has no WGD.
+        muts = doubled_arm_muts()
+        engine = self.run_samples([('S1', self.partly_doubled(), muts, PURITY), ('S2', self.partly_doubled(), muts, PURITY)],
+                                  options=self.options({'S2': True}))
+        by_name = {sample.sample_name: sample for sample in engine.sample_list}
+        self.assertIsNone(by_name['S1'].WGD)
+        self.assertIsNotNone(by_name['S2'].WGD)
         self.assertIsNone(engine.WGD)
+        # Here S1's rule says yes, and with S2 given as doubled the patient has one.
+        doubled = whole_genome(self.genome, male=False, baseline=(2, 2))
+        engine = self.run_samples([('S1', doubled, muts, PURITY), ('S2', self.partly_doubled(), muts, PURITY)],
+                                  options=self.options({'S2': True}))
+        self.assertTrue(all(sample.WGD is not None for sample in engine.sample_list))
+        self.assertIsNotNone(engine.WGD)
 
     def test_sif_column_reaches_the_engine(self):
         cli = CommandLine('run_cli')
@@ -1300,13 +1312,41 @@ class Seed(TimingCase):
         options = TimingOptions(sex='XX', sex_aware=True, continuous_cn=True, clonal_unresolved=True, seed=seed)
         return self.events(self.run_engine(rows, muts=muts, options=options))['gain_17p']
 
-    def test_same_seed_same_result_in_any_order(self):
-        event = self.gained(5)
-        first = event._simulate_p2()
+    def two_gains(self, seed):
+        """An engine with gains on 17p and 5p, each timed by its own clonal mutations."""
+        rows = [r for r in whole_genome(self.genome, male=False) if r[0] not in ('17', '5')]
+        rows += [seg_row('17', 1000, 22000000, 1, 2), seg_row('17', 25000000, 81000000, 1, 1),
+                 seg_row('5', 1000, 46000000, 1, 2), seg_row('5', 50000000, 180000000, 1, 1)]
+        depth = 100
+        def alt(m):
+            return int(depth * m * PURITY / (3 * PURITY + 2 * (1 - PURITY)))
+        muts = [('17', 5000000 + i * 1000, 1, 'A', depth - alt(2), alt(2)) for i in range(12)]
+        muts += [('5', 5000000 + i * 1000, 1, 'A', depth - alt(1 + i % 2), alt(1 + i % 2)) for i in range(12)]
+        options = TimingOptions(sex='XX', sex_aware=True, continuous_cn=True, clonal_unresolved=True, seed=seed)
+        events = self.events(self.run_engine(rows, muts=muts, options=options))
+        return events['gain_17p'], events['gain_5p']
+
+    @staticmethod
+    def time_in_order(first, second):
+        """Time two events one after the other, from the same global random state, and return their distributions."""
         np.random.seed(99)
         random.seed(99)
-        self.assertTrue(np.array_equal(first, event._simulate_p2()))
-        self.assertTrue(np.array_equal(event.pi_dist, self.gained(5).pi_dist))
+        first.get_pi_dist_for_gain()
+        second.get_pi_dist_for_gain()
+        return first.pi_dist.copy(), second.pi_dist.copy()
+
+    def test_same_seed_same_result_in_any_order(self):
+        seventeen, five = self.two_gains(5)
+        a17, a5 = self.time_in_order(seventeen, five)
+        b5, b17 = self.time_in_order(five, seventeen)
+        self.assertTrue(np.array_equal(a17, b17))
+        self.assertTrue(np.array_equal(a5, b5))
+        self.assertTrue(np.array_equal(a17, self.two_gains(5)[0].pi_dist))
+        # Without a seed both draw from the global random state, so the order matters.
+        seventeen, five = self.two_gains(None)
+        a17, a5 = self.time_in_order(seventeen, five)
+        b5, b17 = self.time_in_order(five, seventeen)
+        self.assertFalse(np.array_equal(a17, b17))
 
     def test_without_a_seed_the_global_state_is_used(self):
         event = self.gained(None)
