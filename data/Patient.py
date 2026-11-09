@@ -634,7 +634,8 @@ class Patient:
         would read as gained, as CCND1 does beside a distal 11q deletion. High amplification is the exception: an amplicon
         can fill its own flanks, so a gain this far above the arm counts as well. The modal columns and cancer.cell.frac
         cannot show any of this, since modal states stay near 1/1 at high amplification and the fraction is the distance to
-        the nearest integer for gains. Returns None, or a dict with the allele that moved most, its CCF and the state reached.
+        the nearest integer for gains. Returns None, or a dict with the allele that moved most, its CCF, the state reached and
+        the span of the segment measured.
 
         With two_flanks, a gain that is not high-level needs two real flanks: segments covering min_flank_fraction of
         flank_bp on each side within the arm, so that neither side is the centromere gap or a chromosome end. Otherwise
@@ -718,7 +719,7 @@ class Patient:
         if hemizygous and kind == 'DEL' and a2 >= cn_tol:
             pair = (0., float(a2))  # cells still hold the one allele, so this must not read as nothing left
         return {'a1': use_a1, 'ccf': float(min(abs(delta), 1.)), 'cn': pair[0] if use_a1 else pair[1], 'pair': pair,
-                'high_level': high_level}
+                'high_level': high_level, 'segment': (int(seg.begin), int(seg.end))}
 
     def add_focal_cn_events(self, focal_regions, qval_max=None, focal_max_arm_frac=0.3, min_bp_overlap=1000, padding=100000, require_directional_consistency=False, split_across_centromere=True, segment_homdels=None, continuous=False,
                             focal_gain_max_length=3000000, focal_amp_ploidy=2.):
@@ -930,7 +931,8 @@ class Patient:
                                                           ccf_hat=ccfs, ccf_high=ccfs, ccf_low=ccfs, a1=is_a1,
                                                           dupe=(kind == 'AMP') != is_a1,
                                                           state_pairs=tuple(None if call is None else call['pair'] for call in focal),
-                                                          high_levels=tuple(None if call is None else call['high_level'] for call in focal))
+                                                          high_levels=tuple(None if call is None else call['high_level'] for call in focal),
+                                                          segments=tuple(None if call is None else call['segment'] for call in focal))
                         continue
 
                     # summarize per-allele across samples
@@ -1150,7 +1152,7 @@ class Patient:
                         self._add_cn_event_to_samples(chrom, min(clique_bands), max(clique_bands), clique_arm, local_cn, cn_category, clique_ccf_hat, clique_ccf_high, clique_ccf_low, a1=clique_allele == "a1")
 
     def _add_cn_event_to_samples(self, chrom, start, end, arm, cns, cn_category, ccf_hat, ccf_high, ccf_low, a1=True, dupe=False, state_pairs=None,
-                                 high_levels=None):
+                                 high_levels=None, segments=None):
         """
         Adds CN event to sample in low_coverage_mutations attr and mut hashtable
 
@@ -1166,6 +1168,7 @@ class Patient:
                                  local_cn=local_cn, from_sample=sample, arm=arm, a1=a1, dupe=dupe)
             cn.state_pair = None if state_pairs is None else state_pairs[i]
             cn.high_level = None if high_levels is None else high_levels[i]
+            cn.segment = None if segments is None else segments[i]  # (start, end) of the segment the call measured
             sample.low_coverage_mutations.update({cn.var_str: cn})
             sample.add_muts_to_hashtable(cn)
 

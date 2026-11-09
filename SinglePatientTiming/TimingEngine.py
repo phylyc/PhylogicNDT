@@ -138,14 +138,19 @@ class TimingEngine(object):
             return None
         return True
 
-    def _focal_gain_windows(self):
-        """{chromosome: [(start, end)]} of the focal gains called, by their windows."""
-        windows = defaultdict(list)
+    def _focal_gain_spans(self):
+        """{chromosome: [(start, end)]} of the focal gains called: the segments measured in any carrier sample, or
+        the window where the call kept none."""
+        spans = defaultdict(list)
         for events in self.all_cn_events.values():
             for event in events:
-                if event.Type == 'Focal_gain' and event.start is not None and event.end is not None:
-                    windows[str(event.chrN)].append((int(event.start), int(event.end)))
-        return windows
+                if event.Type != 'Focal_gain':
+                    continue
+                if event.segments:
+                    spans[str(event.chrN)].extend(event.segments)
+                elif event.start is not None and event.end is not None:
+                    spans[str(event.chrN)].append((int(event.start), int(event.end)))
+        return spans
 
     def _loy_before_wgd_unsupported(self, event):
         """True if the WGD rule would place this loss of Y before the WGD while the odds given do not support it."""
@@ -514,10 +519,12 @@ class TimingEngine(object):
                         'ccf': np.zeros(n_samples, dtype=float),
                         'pairs': [None] * n_samples,
                         'high_level': [None] * n_samples,
+                        'segment': [None] * n_samples,
                     }
                 )
                 rec['ccf'][si] = float(getattr(cn, 'ccf_hat', 0.0))
                 rec['high_level'][si] = getattr(cn, 'high_level', None)
+                rec['segment'][si] = getattr(cn, 'segment', None)
                 if self.options.segment_homdels and cn.cn_category == 'Focal_homdel':
                     # The call was made on one segment. The lowest modal state in the window need not agree with it.
                     rec['pairs'][si] = (0., 0.)
@@ -662,6 +669,9 @@ class TimingEngine(object):
             eve.local_cn_consensus = consensus_state
             # A high-level amplification in any carrier, which may fill its own flanks.
             eve.high_level = any(rec['high_level'][i] for i in matched_carrier_idx)
+            # The segments the call measured, in every sample that carries it. The window names the event, but an
+            # amplicon reaches beyond it, and any carrier's copy number can mislead an SNV's multiplicity.
+            eve.segments = tuple(sorted({rec['segment'][i] for i in carrier_idx if rec['segment'][i] is not None}))
 
             # optional hook for a borrowed ARM-LEVEL prior later in time_events()
             # This is metadata only; no borrowed evidence is mixed into the local likelihood here.
@@ -911,7 +921,7 @@ class TimingEngine(object):
                 self.WGD.timing_status = 'estimated'
 
             # As a focal gain is placed against the WGD by no copy number, neither are the mutations it carries.
-            amplified = self._focal_gain_windows() if self.options.continuous_cn else {}
+            amplified = self._focal_gain_spans() if self.options.continuous_cn else {}
             for mut in self.mutations.values():
                 if mut.is_clonal:
                     if any(start <= mut.pos < end for start, end in amplified.get(str(mut.chrN), ())):
@@ -1684,6 +1694,7 @@ class TimingCNEvent(object):
         self.continuous_cn = None
         self.clonality_ambiguous = False
         self.high_level = False  # a focal amplification far above its arm, see Patient._continuous_focal_call
+        self.segments = ()  # spans of the segments a focal call measured, in the samples carrying it
         self.rule_side = None  # 'before' or 'after' the WGD, when the WGD rule placed the event there
         self.wgd_side = None  # rule_side, kept with clonal_unresolved: two events on one side cannot be ordered
         self.p_before_wgd = None  # 1 or 0 with wgd_side: the probability that the event preceded the WGD

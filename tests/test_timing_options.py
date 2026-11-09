@@ -1182,30 +1182,50 @@ class FocalGainShape(FocalCase):
 
 class AmpliconsAndWgd(FocalCase):
     """Fix 5: in a doubled tumor, no focal gain is ordered against the WGD by its copy number, whatever its level."""
-    def doubled(self, *middle, muts=(), baseline=(2, 2)):
+    def doubled(self, *middle, muts=(), baseline=(2, 2), focal=None):
         return self.run_engine(self.with_segments('2', *middle, baseline=baseline), muts=doubled_arm_muts() + list(muts),
-                               focal=[self.AMP], options=TimingOptions(sex='XX', **ALL_ON))
+                               focal=[focal or self.AMP], options=TimingOptions(sex='XX', **ALL_ON))
 
     def test_mutations_in_a_focal_gain_are_unresolved_too(self):
-        inside = [('2', 16050000 + i * 1000, 1, 'A', 44, 36) for i in range(3)]
-        for middle in (seg_row('2', 15900000, 16300000, 2, 2, q1=2., q2=99.), seg_row('2', 15900000, 16300000, 2, 4)):
-            engine = self.doubled(middle, muts=inside)
-            self.assertIn('Focal_gain_2:16000000-16200000', self.events(engine))
-            muts = [m for m in engine.mutations.values() if m.chrN == '2' and 16000000 <= m.pos < 16200000]
-            self.assertEqual(len(muts), 3)
-            for mut in muts:
-                self.assertIsNone(mut.p_before_wgd)
-                self.assertEqual((mut.timing_status, mut.timing_reason), ('clonal_unresolved', 'amplicon_vs_wgd'))
-                self.assertTrue(np.allclose(mut.pi_dist, 1. / 101))
-            self.assertTrue(any(m.p_before_wgd is not None for m in engine.mutations.values() if m.chrN != '2'))
+        # The window names the event; the amplified segment, 2 Mb here, reaches well beyond it.
+        window = ('2', 16080686, 16087129, 'AMP')
+        in_window = [('2', 16083000 + i * 1000, 1, 'A', 44, 36) for i in range(2)]
+        in_segment = [('2', 15500000 + i * 1000, 1, 'A', 44, 36) for i in range(2)]
+        flank = [('2', 17500000 + i * 1000, 1, 'A', 44, 36) for i in range(2)]
+        for middle in (seg_row('2', 15000000, 17000000, 2, 2, q1=2., q2=99.), seg_row('2', 15000000, 17000000, 2, 4)):
+            engine = self.doubled(middle, muts=in_window + in_segment + flank, focal=window)
+            event = self.events(engine)['Focal_gain_2:16080686-16087129']
+            self.assertEqual((event.start, event.end), (16080686, 16087129))
+            self.assertEqual(event.segments, ((15000000, 17000000),))
+            muts = {m.pos: m for m in engine.mutations.values() if m.chrN == '2'}
+            for _, pos, *_ in in_window + in_segment:
+                self.assertIsNone(muts[pos].p_before_wgd)
+                self.assertEqual((muts[pos].timing_status, muts[pos].timing_reason), ('clonal_unresolved', 'amplicon_vs_wgd'))
+                self.assertTrue(np.allclose(muts[pos].pi_dist, 1. / 101))
+            for _, pos, *_ in flank:
+                self.assertIsNotNone(muts[pos].p_before_wgd)
+                self.assertIsNone(getattr(muts[pos], 'timing_reason', None))
         os.chdir(self.tmp)
         self.addCleanup(os.chdir, self.cwd)
         PhylogicOutput().write_timing_tsv(engine)
         table = pd.read_csv('P1.timing.tsv', sep='\t', low_memory=False, dtype={'Chromosome': str})
-        rows = table[(table['Chromosome'] == '2') & table['Start_position'].between(16000000, 16199999)]
-        self.assertEqual(len(rows), 3)
+        rows = table[(table['Chromosome'] == '2') & table['Start_position'].between(15000000, 16999999)]
+        self.assertEqual(len(rows), 4)
         self.assertEqual(set(rows['timing_reason']), {'amplicon_vs_wgd'})
         self.assertTrue(rows['p_before_wgd'].isna().all())
+
+    def test_segments_of_every_carrier_count(self):
+        # Two samples measure the amplicon on different segments: an SNV inside either one is not timed.
+        def rows(start, end):
+            return self.with_segments('2', seg_row('2', start, end, 2, 2, q1=2., q2=99.), baseline=(2, 2))
+        window = ('2', 16080686, 16087129, 'AMP')
+        snvs = [('2', 15200000, 1, 'A', 44, 36), ('2', 16800000, 1, 'A', 44, 36), ('2', 17500000, 1, 'A', 44, 36)]
+        muts = doubled_arm_muts() + snvs
+        engine = self.run_samples([('S1', rows(15000000, 16500000), muts, PURITY), ('S2', rows(15600000, 17000000), muts, PURITY)],
+                                  focal=[window], options=TimingOptions(sex='XX', **ALL_ON))
+        self.assertEqual(self.events(engine)['Focal_gain_2:16080686-16087129'].segments, ((15000000, 16500000), (15600000, 17000000)))
+        muts = {m.pos: m for m in engine.mutations.values() if m.chrN == '2'}
+        self.assertEqual([muts[pos].p_before_wgd is None for pos in (15200000, 16800000, 17500000)], [True, True, False])
 
     def test_mutations_in_a_focal_gain_without_wgd_are_untouched(self):
         inside = [('2', 16050000 + i * 1000, 1, 'A', 44, 36) for i in range(3)]
