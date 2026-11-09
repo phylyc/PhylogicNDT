@@ -723,7 +723,11 @@ class Patient:
         if kind == 'AMP':
             # An amplicon may be split into several segments. Its span runs over the neighbours, without a gap of more
             # than max_gap_bp, whose copy number lies closer to the measured segment than to the reference it cleared.
+            # A high-level amplicon also runs through any segment that is high-level itself, so that a dip below the
+            # midpoint does not cut one contiguous amplicon short.
             level = flank[0] + .5 * step
+            if high_level:
+                level = min(level, arm[0] + gain_high_level_step)
             ordered = sorted((iv for iv in tree.overlap(arm_start, arm_end) if iv.data[1].get('total_cn_cont') is not None),
                              key=lambda iv: iv.begin)
             index = ordered.index(seg)

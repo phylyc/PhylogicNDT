@@ -1224,6 +1224,23 @@ class AmpliconsAndWgd(FocalCase):
         muts = {m.pos: m for m in engine.mutations.values() if m.chrN == '2'}
         self.assertEqual([muts[pos].p_before_wgd is None for pos in (15500000, 16300500, 17800000)], [True, True, False])
 
+    def test_the_span_runs_through_a_dip_that_is_still_high_level(self):
+        # Peak at 62 copies on a doubled arm of 4: the midpoint is 33, the high-level line 4 + 2 x ploidy, about 12.
+        # The dip at 22 copies is below the midpoint but high-level itself, so the amplicon goes on beyond it.
+        window = ('2', 15200000, 15210000, 'AMP')
+        snvs = [('2', 16200000, 1, 'A', 44, 36), ('2', 17500000, 1, 'A', 44, 36)]
+        engine = self.doubled(seg_row('2', 15000000, 15500000, 2, 2, q1=2., q2=60.), seg_row('2', 15500001, 15800000, 2, 2, q1=2., q2=20.),
+                              seg_row('2', 15800001, 16500000, 2, 2, q1=2., q2=50.), muts=snvs, focal=window)
+        self.assertEqual(self.events(engine)['Focal_gain_2:15200000-15210000'].segments, ((15000000, 16500000),))
+        muts = {m.pos: m for m in engine.mutations.values() if m.chrN == '2'}
+        self.assertEqual([muts[pos].p_before_wgd is None for pos in (16200000, 17500000)], [True, False])
+
+    def test_a_low_level_gain_keeps_the_midpoint(self):
+        # A gain of 2 copies with a neighbour 0.8 above the arm: below the midpoint, so not part of the gain.
+        window = ('2', 15200000, 15210000, 'AMP')
+        engine = self.doubled(seg_row('2', 15000000, 15500000, 2, 4), seg_row('2', 15500001, 16500000, 2, 2, q1=2., q2=2.8), focal=window)
+        self.assertEqual(self.events(engine)['Focal_gain_2:15200000-15210000'].segments, ((15000000, 15500000),))
+
     def test_segments_of_every_carrier_count(self):
         # Two samples measure the amplicon on different segments: an SNV inside either one is not timed.
         def rows(start, end):
@@ -1236,6 +1253,21 @@ class AmpliconsAndWgd(FocalCase):
         self.assertEqual(self.events(engine)['Focal_gain_2:16080686-16087129'].segments, ((15000000, 16500000), (15600000, 17000000)))
         muts = {m.pos: m for m in engine.mutations.values() if m.chrN == '2'}
         self.assertEqual([muts[pos].p_before_wgd is None for pos in (15200000, 16800000, 17500000)], [True, True, False])
+
+    def test_a_carrier_outside_the_consensus_state_counts(self):
+        # The carriers reach different states, so only S1 holds the consensus. S2's longer amplicon still counts.
+        def rows(end, copies):
+            return self.with_segments('2', seg_row('2', 15000000, end, 2, 2, q1=2., q2=copies), baseline=(2, 2))
+        window = ('2', 15200000, 15210000, 'AMP')
+        muts = doubled_arm_muts() + [('2', 16500000, 1, 'A', 44, 36)]
+        engine = self.run_samples([('S1', rows(16000000, 60.), muts, PURITY), ('S2', rows(17000000, 30.), muts, PURITY)],
+                                  focal=[window], options=TimingOptions(sex='XX', **ALL_ON))
+        event = self.events(engine)['Focal_gain_2:15200000-15210000']
+        self.assertEqual(event.carrier_sample_idx, (0,))
+        self.assertEqual(event.segments, ((15000000, 16000000), (15000000, 17000000)))
+        mut = next(m for m in engine.mutations.values() if m.chrN == '2' and m.pos == 16500000)
+        self.assertIsNone(mut.p_before_wgd)
+        self.assertEqual(mut.timing_reason, 'amplicon_vs_wgd')
 
     def test_mutations_in_a_focal_gain_without_wgd_are_untouched(self):
         inside = [('2', 16050000 + i * 1000, 1, 'A', 44, 36) for i in range(3)]
