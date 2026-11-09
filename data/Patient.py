@@ -626,7 +626,8 @@ class Patient:
 
     def _continuous_focal_call(self, sample, chrom, start, end, arm_start, arm_end, kind, artifacts, min_overlap, min_step=.5,
                                min_z=3., min_sd=.1, cn_tol=.2, flank_bp=2000000, max_arm_fraction=.3, min_probes=5, high_level_step=4.,
-                               max_gain_length=None, high_level_ploidy=None, two_flanks=False, min_flank_fraction=.25):
+                               max_gain_length=None, high_level_ploidy=None, two_flanks=False, min_flank_fraction=.25,
+                               max_gap_bp=100000):
         """
         A focal gain or loss in [start, end): the most extreme segment in the window, against what lies on either side.
 
@@ -635,7 +636,7 @@ class Patient:
         can fill its own flanks, so a gain this far above the arm counts as well. The modal columns and cancer.cell.frac
         cannot show any of this, since modal states stay near 1/1 at high amplification and the fraction is the distance to
         the nearest integer for gains. Returns None, or a dict with the allele that moved most, its CCF, the state reached and
-        the span of the segment measured.
+        the span of the segment measured; for a gain, extended over adjacent segments at the amplicon's level.
 
         With two_flanks, a gain that is not high-level needs two real flanks: segments covering min_flank_fraction of
         flank_bp on each side within the arm, so that neither side is the centromere gap or a chromosome end. Otherwise
@@ -718,8 +719,26 @@ class Patient:
         pair = (reached(a1), float(round(a2))) if use_a1 else (0. if hemizygous else float(round(a1)), reached(a2))
         if hemizygous and kind == 'DEL' and a2 >= cn_tol:
             pair = (0., float(a2))  # cells still hold the one allele, so this must not read as nothing left
+        span = (int(seg.begin), int(seg.end))
+        if kind == 'AMP':
+            # An amplicon may be split into several segments. Its span runs over the neighbours, without a gap of more
+            # than max_gap_bp, whose copy number lies closer to the measured segment than to the reference it cleared.
+            level = flank[0] + .5 * step
+            ordered = sorted((iv for iv in tree.overlap(arm_start, arm_end) if iv.data[1].get('total_cn_cont') is not None),
+                             key=lambda iv: iv.begin)
+            index = ordered.index(seg)
+            lo, hi = seg.begin, seg.end
+            for j in range(index - 1, -1, -1):
+                if ordered[j].end < lo - max_gap_bp or ordered[j].data[1]['total_cn_cont'] < level:
+                    break
+                lo = min(lo, ordered[j].begin)
+            for j in range(index + 1, len(ordered)):
+                if ordered[j].begin > hi + max_gap_bp or ordered[j].data[1]['total_cn_cont'] < level:
+                    break
+                hi = max(hi, ordered[j].end)
+            span = (int(lo), int(hi))
         return {'a1': use_a1, 'ccf': float(min(abs(delta), 1.)), 'cn': pair[0] if use_a1 else pair[1], 'pair': pair,
-                'high_level': high_level, 'segment': (int(seg.begin), int(seg.end))}
+                'high_level': high_level, 'segment': span}
 
     def add_focal_cn_events(self, focal_regions, qval_max=None, focal_max_arm_frac=0.3, min_bp_overlap=1000, padding=100000, require_directional_consistency=False, split_across_centromere=True, segment_homdels=None, continuous=False,
                             focal_gain_max_length=3000000, focal_amp_ploidy=2.):

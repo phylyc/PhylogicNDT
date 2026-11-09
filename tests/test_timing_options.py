@@ -1214,6 +1214,16 @@ class AmpliconsAndWgd(FocalCase):
         self.assertEqual(set(rows['timing_reason']), {'amplicon_vs_wgd'})
         self.assertTrue(rows['p_before_wgd'].isna().all())
 
+    def test_the_span_covers_an_amplicon_of_several_segments(self):
+        # The window lies in the higher segment; the lower one, still far above the arm, is part of the same amplicon.
+        window = ('2', 16300000, 16310000, 'AMP')
+        snvs = [('2', 15500000, 1, 'A', 44, 36), ('2', 16300500, 1, 'A', 44, 36), ('2', 17800000, 1, 'A', 44, 36)]
+        engine = self.doubled(seg_row('2', 15000000, 16000000, 2, 2, q1=2., q2=36.), seg_row('2', 16000001, 17000000, 2, 2, q1=2., q2=38.),
+                              muts=snvs, focal=window)
+        self.assertEqual(self.events(engine)['Focal_gain_2:16300000-16310000'].segments, ((15000000, 17000000),))
+        muts = {m.pos: m for m in engine.mutations.values() if m.chrN == '2'}
+        self.assertEqual([muts[pos].p_before_wgd is None for pos in (15500000, 16300500, 17800000)], [True, True, False])
+
     def test_segments_of_every_carrier_count(self):
         # Two samples measure the amplicon on different segments: an SNV inside either one is not timed.
         def rows(start, end):
