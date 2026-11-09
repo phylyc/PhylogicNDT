@@ -651,7 +651,7 @@ class TimingEngine(object):
             eve.carrier_sample_idx = tuple(matched_carrier_idx)
             eve.carrier_sample_names = tuple(self.sample_list[i].sample_name for i in matched_carrier_idx)
             eve.local_cn_consensus = consensus_state
-            # A high-level amplification in any carrier: its copy number says nothing of its order against a WGD.
+            # A high-level amplification in any carrier, which may fill its own flanks.
             eve.high_level = any(rec['high_level'][i] for i in matched_carrier_idx)
 
             # optional hook for a borrowed ARM-LEVEL prior later in time_events()
@@ -924,9 +924,10 @@ class TimingEngine(object):
                         cn_event.pi_dist = uniform_dist.copy()
                         _set_status(cn_event, status='prior_only', source='homdel',
                                     reason='homdel_no_local_evidence')
-                    elif cn_event.Type.endswith('gain') and getattr(cn_event, 'high_level', False):
-                        # The parity rule counts copies made by doubling the genome. An amplicon, often extrachromosomal,
-                        # gains copies by its own route, so neither parity nor level places it against the WGD.
+                    elif cn_event.Type == 'Focal_gain' and self.options.continuous_cn:
+                        # The parity rule counts copies made by doubling the genome. A focal gain may have gained its
+                        # copies by its own route, as amplicons, often extrachromosomal, do, and its level cannot tell
+                        # which: no focal gain is placed against the WGD, whatever its level.
                         _set_not_estimable(cn_event, reason='amplicon_vs_wgd')
                     elif cn_event.Type.endswith('gain'):
                         cn_event.get_pi_dist_for_higher_gain(self.WGD)

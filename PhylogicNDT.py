@@ -542,7 +542,8 @@ def build_parser():
                                dest='focal_amp_ploidy',
                                default=2.,
                                help='With --continuous_cn: a focal gain this many times the ploidy above its arm is a '
-                                    'high-level amplification. It may then fill its own flanks, and is not timed against a WGD.')
+                                    'high-level amplification. It may then fill its own flanks. No focal gain is timed '
+                                    'against a WGD.')
 
     timing = subparsers.add_parser("Timing", help="Time somatic events in one or multiple samples.",
                                    parents=[base_parser, timing_parent])

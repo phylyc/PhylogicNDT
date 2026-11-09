@@ -1181,7 +1181,7 @@ class FocalGainShape(FocalCase):
 
 
 class AmpliconsAndWgd(FocalCase):
-    """Fix 5: in a doubled tumor, a high-level amplification is not ordered against the WGD by its copy number."""
+    """Fix 5: in a doubled tumor, no focal gain is ordered against the WGD by its copy number, whatever its level."""
     def doubled(self, *middle):
         return self.run_engine(self.with_segments('2', *middle, baseline=(2, 2)), muts=doubled_arm_muts(), focal=[self.AMP],
                                options=TimingOptions(sex='XX', **ALL_ON))
@@ -1195,12 +1195,23 @@ class AmpliconsAndWgd(FocalCase):
         self.assertEqual(event.timing_reason, 'amplicon_vs_wgd')
         self.assertIsNone(event.pi_dist)
 
-    def test_low_level_focal_gain_keeps_the_rule(self):
+    def test_low_level_focal_gain_is_unresolved_too(self):
+        # Two copies above a doubled arm: the parity rule would place it before the WGD.
         engine = self.doubled(seg_row('2', 15900000, 16300000, 2, 4))
         event = self.events(engine)['Focal_gain_2:16000000-16200000']
         self.assertFalse(event.high_level)
-        self.assertEqual(event.timing_status, 'estimated')
-        self.assertLess(self.pi_mean(event.pi_dist), self.pi_mean(engine.WGD.pi_dist))
+        self.assertEqual(event.timing_status, 'clonal_unresolved')
+        self.assertEqual(event.timing_reason, 'amplicon_vs_wgd')
+        self.assertIsNone(event.pi_dist)
+        self.assertIsNone(event.wgd_side)
+
+    def test_focal_losses_keep_the_rule(self):
+        size = self.genome.CHROM_DICT['9']
+        rows = [r for r in whole_genome(self.genome, male=False, baseline=(2, 2)) if r[0] != '9']
+        rows += [seg_row('9', 1000, 8999999, 2, 2), seg_row('9', 9000000, 9500000, 1, 2), seg_row('9', 9500001, size - 1000, 2, 2)]
+        engine = self.run_engine(rows, muts=doubled_arm_muts(), focal=[self.DEL], options=TimingOptions(sex='XX', **ALL_ON))
+        event = self.events(engine)['Focal_loss_9:8000000-11000000']
+        self.assertEqual((event.timing_status, event.timing_source, event.wgd_side), ('estimated', 'wgd_rule', 'after'))
 
 
 class SameSideOfWgd(TimingCase):
