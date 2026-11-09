@@ -636,11 +636,12 @@ class Patient:
         cannot show any of this, since modal states stay near 1/1 at high amplification and the fraction is the distance to
         the nearest integer for gains. Returns None, or a dict with the allele that moved most, its CCF and the state reached.
 
-        With two_flanks, a gain needs two real flanks: segments covering min_flank_fraction of flank_bp on each side within
-        the arm, so that neither side is the centromere gap or a chromosome end. Given max_gain_length, its segment can be
-        no longer. Otherwise the remnant of an arm beside a partial loss passes on its one flank, as proximal 11q does.
-        Given high_level_ploidy, a gain is high-level from that many times the ploidy above the arm, instead of
-        high_level_step copies; losses keep high_level_step. The result says whether the gain reached it.
+        With two_flanks, a gain that is not high-level needs two real flanks: segments covering min_flank_fraction of
+        flank_bp on each side within the arm, so that neither side is the centromere gap or a chromosome end. Otherwise
+        the remnant of an arm beside a partial loss passes on its one flank, as proximal 11q does. A high-level gain may
+        fill its own flanks there too. Given max_gain_length, a gain's segment can be no longer. Given high_level_ploidy,
+        a gain is high-level from that many times the ploidy above the arm, instead of high_level_step copies; losses
+        keep high_level_step. The result says whether the gain reached it.
         """
         tree = sample.CnProfile[chrom]
         hemizygous = chrom in self.hemizygous_chroms
@@ -681,19 +682,20 @@ class Patient:
             return (medians, sum(r[2] for r in rows)) if cover else medians
 
         sides = [side(seg.begin - flank_bp, seg.begin, cover=True), side(seg.end, seg.end + flank_bp, cover=True)]
-        if kind == 'AMP' and two_flanks and any(length < min_flank_fraction * flank_bp for _, length in sides):
+        high_level = False
+        if kind == 'AMP':
+            arm = side(arm_start, arm_end)
+            high_level = seg.data[1]['total_cn_cont'] - arm[0] >= gain_high_level_step
+        if kind == 'AMP' and two_flanks and not high_level and \
+                any(length < min_flank_fraction * flank_bp for _, length in sides):
             return None
         flanks = [flank for flank, _ in sides if flank[0] == flank[0]]
         if not flanks:
             return None
         # The event must clear both sides: the higher flank for a gain and the lower one for a loss.
         flank = max(flanks, key=lambda f: f[0]) if kind == 'AMP' else min(flanks, key=lambda f: f[0])
-        high_level = False
-        if kind == 'AMP':
-            arm = side(arm_start, arm_end)
-            if seg.data[1]['total_cn_cont'] - arm[0] >= gain_high_level_step:
-                flank = arm
-                high_level = True
+        if high_level:
+            flank = arm
         step = seg.data[1]['total_cn_cont'] - flank[0]
         if (kind == 'AMP') != (step > 0):
             return None

@@ -1111,6 +1111,19 @@ class FocalGainShape(FocalCase):
                  seg_row('5', 1300001, self.genome.CHROM_DICT['5'] - 1000, 1, 1)]
         self.assertIn('Focal_gain_5:1253262-1295184', self.focal(rows, [('5', 1253262, 1295184, 'AMP')]))
 
+    def test_amplicon_at_an_arm_end_fills_its_own_flank(self):
+        # A high-level amplification needs no second flank: here it starts at the 5p end.
+        rows = [r for r in whole_genome(self.genome, male=False) if r[0] != '5']
+        rows += [seg_row('5', 10000, 1300000, 1, 1, q1=1., q2=40.), seg_row('5', 1300001, self.genome.CHROM_DICT['5'] - 1000, 1, 1)]
+        event = self.focal(rows, [('5', 1253262, 1295184, 'AMP')])['Focal_gain_5:1253262-1295184']
+        self.assertTrue(event.high_level)
+        # Against the centromere too.
+        size = self.genome.CHROM_DICT['11']
+        rows = [r for r in whole_genome(self.genome, male=False) if r[0] != '11']
+        rows += [seg_row('11', 1000, 51000000, 1, 1), seg_row('11', 54000000, 56000000, 1, 1, q1=1., q2=40.),
+                 seg_row('11', 56000001, size - 1000, 1, 1)]
+        self.assertIn('Focal_gain_11:55000000-55100000', self.focal(rows, [('11', 55000000, 55100000, 'AMP')]))
+
     def test_deletions_keep_the_four_copy_noise_exemption(self):
         # A noisy loss of 5 copies at ploidy about 4: the exemption from the noise test starts at 4 copies for losses,
         # not at twice the ploidy, which applies to gains only.
