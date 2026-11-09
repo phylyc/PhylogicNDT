@@ -639,13 +639,14 @@ class Patient:
         With two_flanks, a gain needs two real flanks: segments covering min_flank_fraction of flank_bp on each side within
         the arm, so that neither side is the centromere gap or a chromosome end. Given max_gain_length, its segment can be
         no longer. Otherwise the remnant of an arm beside a partial loss passes on its one flank, as proximal 11q does.
-        Given high_level_ploidy, high amplification starts that many times the ploidy above the arm, instead of
-        high_level_step copies. The result says whether the gain reached it.
+        Given high_level_ploidy, a gain is high-level from that many times the ploidy above the arm, instead of
+        high_level_step copies; losses keep high_level_step. The result says whether the gain reached it.
         """
         tree = sample.CnProfile[chrom]
         hemizygous = chrom in self.hemizygous_chroms
+        gain_high_level_step = high_level_step
         if high_level_ploidy is not None:
-            high_level_step = high_level_ploidy * sample.ploidy_from_segments()
+            gain_high_level_step = high_level_ploidy * sample.ploidy_from_segments()
         window = []
         for iv in tree.overlap(start, end):
             if min(iv.end, end) - max(iv.begin, start) < min_overlap or iv.data[1].get('total_cn_cont') is None:
@@ -690,7 +691,7 @@ class Patient:
         high_level = False
         if kind == 'AMP':
             arm = side(arm_start, arm_end)
-            if seg.data[1]['total_cn_cont'] - arm[0] >= high_level_step:
+            if seg.data[1]['total_cn_cont'] - arm[0] >= gain_high_level_step:
                 flank = arm
                 high_level = True
         step = seg.data[1]['total_cn_cont'] - flank[0]
@@ -701,7 +702,8 @@ class Patient:
         sd = max(sd, min_sd) if np.isfinite(sd) else min_sd
         # One allele has half the room to move, so a step counts from half the size.
         # Noise grows with copy ratio, so the test cannot apply to high amplification, whose size is not in doubt.
-        if abs(step) < (min_step / 2. if hemizygous else min_step) or (abs(step) / sd < min_z and abs(step) < high_level_step):
+        exempt_step = gain_high_level_step if kind == 'AMP' else high_level_step
+        if abs(step) < (min_step / 2. if hemizygous else min_step) or (abs(step) / sd < min_z and abs(step) < exempt_step):
             return None
         a1, a2 = sample.allele_copy_number(seg.data[1])
         delta1, delta2 = a1 - flank[1], a2 - flank[2]

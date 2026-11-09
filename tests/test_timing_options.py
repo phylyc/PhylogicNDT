@@ -1111,6 +1111,14 @@ class FocalGainShape(FocalCase):
                  seg_row('5', 1300001, self.genome.CHROM_DICT['5'] - 1000, 1, 1)]
         self.assertIn('Focal_gain_5:1253262-1295184', self.focal(rows, [('5', 1253262, 1295184, 'AMP')]))
 
+    def test_deletions_keep_the_four_copy_noise_exemption(self):
+        # A noisy loss of 5 copies at ploidy about 4: the exemption from the noise test starts at 4 copies for losses,
+        # not at twice the ploidy, which applies to gains only.
+        size = self.genome.CHROM_DICT['9']
+        rows = [r for r in whole_genome(self.genome, male=False, baseline=(2, 2)) if r[0] != '9']
+        rows += [seg_row('9', 1000, 8999999, 3, 3), seg_row('9', 9000000, 9500000, 0, 1, sigma=1.), seg_row('9', 9500001, size - 1000, 3, 3)]
+        self.assertIn('Focal_loss_9:8000000-11000000', self.focal(rows, [self.DEL]))
+
     def test_long_gain_is_not_focal(self):
         self.assertNotIn('Focal_gain_2:16000000-16200000', self.focal(self.with_segments('2', seg_row('2', 14000000, 17500000, 1, 2)), [self.AMP]))
         self.assertIn('Focal_gain_2:16000000-16200000', self.focal(self.with_segments('2', seg_row('2', 14500000, 17000000, 1, 2)), [self.AMP]))
