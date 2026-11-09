@@ -2051,12 +2051,16 @@ class TimingMut(object):
         if not mask.any():
             return
 
-        # The samples' evidence on before against after multiplies, as their distributions do below.
-        log_before = np.sum(np.log(np.clip(p_before[mask], 1e-300, 1.)))
-        log_after = np.sum(np.log(np.clip(p_after[mask], 1e-300, 1.)))
+        pi_cdf = np.cumsum(matched_gain.pi_dist)
+        # The probability of preceding the gain under this model: the before-weight of the distribution built below.
+        # Each bin holds (1 - cdf) p_before + cdf p_after, so the gain's timing weighs the two sides by
+        # sum(1 - cdf) and sum(cdf), and the samples' evidence multiplies as their distributions do.
+        log_before = np.log(max(np.sum(np.clip(1. - pi_cdf, 0., None)), 1e-300))
+        log_after = np.log(max(np.sum(np.clip(pi_cdf, 0., None)), 1e-300))
+        log_before += np.sum(np.log(np.clip(p_before[mask], 1e-300, 1.)))
+        log_after += np.sum(np.log(np.clip(p_after[mask], 1e-300, 1.)))
         self.p_before_gain = float(expit(log_before - log_after))
 
-        pi_cdf = np.cumsum(matched_gain.pi_dist)
         pi_dist = np.outer(1.0 - pi_cdf, p_before[mask]) + np.outer(pi_cdf, p_after[mask])
         pi_dist = pi_dist * (pi_dist >= 0) + 1e-10
         pi_dist = np.sum(np.log(pi_dist / np.sum(pi_dist, 0)), 1)

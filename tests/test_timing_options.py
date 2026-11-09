@@ -1314,23 +1314,43 @@ class WgdAnchoredPairs(TimingCase):
         events = self.events(engine)
         self.assertEqual((events['loss_Y'].p_before_wgd, events['loss_17p'].p_before_wgd), (1., 1.))
 
-    def test_samples_combine_as_their_distributions_do(self):
+    @staticmethod
+    def timed_mut(n_samples, alt, ref=80):
+        """A clonal SNV on 2/2 in n identical samples, timed against an early WGD, whose two sides weigh unequally."""
         class Sample(object):
             def __init__(self):
                 self.purity, self.options, self.sample_name = PURITY, TimingOptions(), 'S'
 
         class Gain(object):
-            pi_dist = np.ones(101) / 101
+            grid = np.linspace(0, 1, 101)
+            pi_dist = np.exp(-((grid - .3) ** 2) / .005)
+            pi_dist /= pi_dist.sum()
 
-        def mut(n_samples, alt=26, ref=54):
-            mut = TimingMut([Sample() for _ in range(n_samples)], 'G', '1', 100, 'T', 'A', np.full(n_samples, alt),
-                            np.full(n_samples, ref), np.full(n_samples, 2.), np.full(n_samples, 2.),
-                            np.tile(clonal_grid(), (n_samples, 1)))
-            mut.get_pi_dist(Gain())
-            return mut.p_before_gain
-        one, two = mut(1), mut(2)
-        self.assertTrue(.05 < one < .95)
-        self.assertAlmostEqual(two, one ** 2 / (one ** 2 + (1 - one) ** 2))
+        mut = TimingMut([Sample() for _ in range(n_samples)], 'G', '1', 100, 'T', 'A', np.full(n_samples, alt),
+                        np.full(n_samples, ref - alt), np.full(n_samples, 2.), np.full(n_samples, 2.),
+                        np.tile(clonal_grid(), (n_samples, 1)))
+        mut.get_pi_dist(Gain())
+        cdf = np.cumsum(Gain.pi_dist)
+        return mut, np.sum(1 - cdf), np.sum(cdf)
+
+    def test_q_is_the_before_weight_of_its_distribution(self):
+        # The distribution is q (1 - cdf) / A + (1 - q) cdf / B: q is read back from it by least squares.
+        grid = np.linspace(0, 1, 101)
+        wgd = np.exp(-((grid - .3) ** 2) / .005)
+        cdf = np.cumsum(wgd / wgd.sum())
+        for alt in (12, 20, 26, 30, 36):
+            mut, a, b = self.timed_mut(1, alt)
+            u, v = (1 - cdf) / a, cdf / b
+            weight = float(np.dot(u - v, mut.pi_dist - v) / np.dot(u - v, u - v))
+            self.assertAlmostEqual(mut.p_before_gain, weight, places=6, msg=str(alt))
+
+    def test_samples_combine_as_their_distributions_do(self):
+        one, a, b = self.timed_mut(1, 26)
+        two = self.timed_mut(2, 26)[0]
+        q = one.p_before_gain
+        ratio = q / (1 - q) * b / a  # p_before / p_after of one sample
+        self.assertTrue(.05 < q < .95)
+        self.assertAlmostEqual(two.p_before_gain, a * ratio ** 2 / (a * ratio ** 2 + b))
 
     def test_table_round_trip(self):
         engine = self.doubled()
