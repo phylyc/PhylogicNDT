@@ -731,17 +731,24 @@ class TimingEngine(object):
             sds = [s.continuous_sd if s.continuous_sd is not None else (0., 0.) for s in (p, q)]
             continuous_sd = tuple(float(np.sqrt(np.sum((weights * np.array([sds[0][i], sds[1][i]])) ** 2)))
                                   for i in range(2))
+            if p.continuous is None and q.continuous is None:
+                # Integer states, as without continuous_cn: the merged events must be called the same way as the arms'.
+                continuous = continuous_sd = None
             muts = list(p.supporting_muts) + [mut for mut in q.supporting_muts if mut not in p.supporting_muts]
             state = TimingCNState(p.sample_list, chrN, '', (p.cn_a1, p.cn_a2), p.purity, supporting_muts=muts,
                                   continuous=continuous, continuous_sd=continuous_sd, cn_type_prefix='Chrom')
             state.call_events(wgd=self.WGD is not None)
             state.merged_arms = (p, q)
+            # Integer states give both gains of a 2/2 arm the same type and no allele, so each event pairs only once.
+            q_left, merged_left = list(q.cn_events), list(state.cn_events)
             for p_event in list(p.cn_events):
                 kind = p_event.Type.split('_', 1)[1]
-                q_event = next((e for e in q.cn_events if e.Type == p_event.Type and e.allele == p_event.allele), None)
-                event = next((e for e in state.cn_events if e.Type == 'Chrom_' + kind and e.allele == p_event.allele), None)
+                q_event = next((e for e in q_left if e.Type == p_event.Type and e.allele == p_event.allele), None)
+                event = next((e for e in merged_left if e.Type == 'Chrom_' + kind and e.allele == p_event.allele), None)
                 if q_event is None or event is None:
                     continue
+                q_left.remove(q_event)
+                merged_left.remove(event)
                 pair = (p_event, q_event)
                 lower = min(pair, key=lambda e: -1. if e.ccf_hat is None else e.ccf_hat)
                 event.ccf_hat = lower.ccf_hat

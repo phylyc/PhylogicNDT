@@ -1500,6 +1500,15 @@ class WholeChromosomeEvents(TimingCase):
         engine.merge_whole_chromosome_events()
         self.assertIn('gain_17', self.events(engine))
 
+    def test_integer_states_merge(self):
+        # Without continuous_cn the events have no allele, and a 2/2 arm holds two gains of one type.
+        options = TimingOptions(sex='XX', sex_aware=True, clonal_unresolved=True, whole_chromosome_events=True)
+        engine = self.run_engine(self.seventeen((2, 2), (2, 2)), options=options)
+        self.assertEqual([e.Type for e in engine.all_cn_events['gain_17']], ['Chrom_gain', 'Chrom_gain'])
+        self.assertEqual(engine.all_cn_events['gain_17p'] + engine.all_cn_events['gain_17q'], [])
+        engine = self.run_engine(self.seventeen((1, 2), (1, 2)), options=options)
+        self.assertEqual(len(engine.all_cn_events['gain_17']), 1)
+
     def test_male_x_and_y(self):
         rows = [r for r in whole_genome(self.genome, male=True) if r[0] != 'X'] + y_rows(0.)
         size = self.genome.CHROM_DICT['X']
