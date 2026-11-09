@@ -1500,6 +1500,20 @@ class WholeChromosomeEvents(TimingCase):
         engine.merge_whole_chromosome_events()
         self.assertIn('gain_17', self.events(engine))
 
+    def test_focal_event_finds_the_prior_of_its_merged_arm(self):
+        # A focal gain reaching the state of its arm borrows the arm's timing. With both arms merged, that is the
+        # timing of the whole-chromosome event.
+        rows = [r for r in whole_genome(self.genome, male=False) if r[0] != '17']
+        rows += [seg_row('17', 1000, 22000000, 1, 2), seg_row('17', 25000000, 55000000, 1, 2), seg_row('17', 55000001, 57000000, 1, 1),
+                 seg_row('17', 57000001, 57500000, 1, 2), seg_row('17', 57500001, 59500000, 1, 1), seg_row('17', 59500001, 81000000, 1, 2)]
+        depth = 100
+        alt = int(depth * 2 * PURITY / (3 * PURITY + 2 * (1 - PURITY)))
+        muts = [('17', start + i * 1000, 1, 'A', depth - alt, alt) for start in (5000000, 40000000) for i in range(6)]
+        events = self.events(self.engine(rows, muts=muts, focal=[('17', 57100000, 57200000, 'AMP')]))
+        focal = events['Focal_gain_17:57100000-57200000']
+        self.assertEqual((focal.timing_status, focal.timing_source), ('prior_only', 'arm_prior'))
+        self.assertTrue(np.allclose(focal.pi_dist, events['gain_17'].pi_dist))
+
     def test_integer_states_merge(self):
         # Without continuous_cn the events have no allele, and a 2/2 arm holds two gains of one type.
         options = TimingOptions(sex='XX', sex_aware=True, clonal_unresolved=True, whole_chromosome_events=True)
