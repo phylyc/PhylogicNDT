@@ -1460,6 +1460,30 @@ class WholeChromosomeEvents(TimingCase):
         self.assertEqual(early.timing_status, 'estimated')
         self.assertGreater(self.pi_mean(early.pi_dist), self.pi_mean(late.pi_dist) + .3)
 
+    def test_every_sample_must_hold_the_state(self):
+        # S2's 17q is subclonal. The patient-level states take each value from the sample closest to the integer state.
+        def rows(q2):
+            base = [r for r in whole_genome(self.genome, male=False) if r[0] != '17']
+            return base + [seg_row('17', 1000, 22000000, 1, 2, q2=2.), seg_row('17', 25000000, 81000000, 1, 2, q2=q2)]
+        options = TimingOptions(sex='XX', sex_aware=True, continuous_cn=True, clonal_unresolved=True, whole_chromosome_events=True)
+        engine = self.run_samples([('S1', rows(2.), (), PURITY), ('S2', rows(1.5), (), PURITY)], options=options)
+        events = self.events(engine)
+        self.assertNotIn('gain_17', events)
+        self.assertTrue(events['gain_17p'].is_clonal)
+        self.assertEqual(events['gain_17q'].timing_status, 'subclonal')
+        engine = self.run_samples([('S1', rows(2.), (), PURITY), ('S2', rows(2.), (), PURITY)], options=options)
+        self.assertTrue(self.events(engine)['gain_17'].is_clonal)
+
+    def test_values_must_be_finite(self):
+        engine = self.engine(self.seventeen((1, 2), (1, 2)), whole=False)
+        p = engine.concordant_cn_states['17p']
+        p.continuous = (float('nan'), p.continuous[1])
+        engine.merge_whole_chromosome_events()
+        self.assertNotIn('gain_17', self.events(engine))
+        p.continuous = (1., p.continuous[1])
+        engine.merge_whole_chromosome_events()
+        self.assertIn('gain_17', self.events(engine))
+
     def test_male_x_and_y(self):
         rows = [r for r in whole_genome(self.genome, male=True) if r[0] != 'X'] + y_rows(0.)
         size = self.genome.CHROM_DICT['X']

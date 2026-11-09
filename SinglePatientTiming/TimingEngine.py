@@ -698,23 +698,36 @@ class TimingEngine(object):
         One event for a change on both arms of a chromosome in the same state, named for the chromosome (gain_17).
 
         A numerical gain of chromosome 17 otherwise reads as gain_17p and gain_17q, and so counts as the segmental 17q
-        gain. The arms must hold the same modal state and continuous values within the tolerance, and the event must be
-        on the same allele of both. Its mutations are those of both arms, its CCF the lower of the two, and it is clonal
-        only if both are. Acrocentric chromosomes have no called p arm and keep their q-arm names. Terminal partial-arm
-        states are left alone, and so is chrY, which is one event already.
+        gain. In every sample, both arms must hold the same modal state and finite continuous values within the
+        tolerance, and the event must be on the same allele of both. The patient-level states cannot decide this: each
+        of their values comes from whichever sample is closest to the integer state. The event's mutations are those of
+        both arms and its CCF the lower of the two, and it is clonal only if both are. Acrocentric chromosomes have no
+        called p arm and keep their q-arm names. Terminal partial-arm states are left alone, and so is chrY, which is
+        one event already.
         """
         tol = self.options.cn_event_tol
+
+        def values(state):
+            return state.continuous if state.continuous is not None else (state.cn_a1, state.cn_a2)
+
+        def same(p, q):
+            if p is None or q is None or (p.cn_a1, p.cn_a2) != (q.cn_a1, q.cn_a2):
+                return False
+            pairs = list(zip(values(p), values(q)))
+            return all(np.isfinite(a) and np.isfinite(b) and abs(a - b) <= tol for a, b in pairs)
+
         for chrN in self.genome.CHROMS:
             p, q = self.concordant_cn_states.get(chrN + 'p'), self.concordant_cn_states.get(chrN + 'q')
-            if p is None or q is None or (p.cn_a1, p.cn_a2) != (q.cn_a1, q.cn_a2) or not p.cn_events or not q.cn_events:
+            if not same(p, q) or not p.cn_events or not q.cn_events:
                 continue
-            values = [s.continuous if s.continuous is not None else (s.cn_a1, s.cn_a2) for s in (p, q)]
-            if any(abs(a - b) > tol for a, b in zip(*values) if np.isfinite(a) and np.isfinite(b)):
+            if not all(same(sample.cn_states.get(chrN + 'p'), sample.cn_states.get(chrN + 'q'))
+                       for sample in self.sample_list):
                 continue
+            arm_values = [values(p), values(q)]
             weights = np.array([self.genome.CENT_DICT[chrN], self.genome.CHROM_DICT[chrN] - self.genome.CENT_DICT[chrN]],
                                dtype=float)
             weights /= weights.sum()
-            continuous = tuple(float(np.nansum(weights * np.array([values[0][i], values[1][i]]))) for i in range(2))
+            continuous = tuple(float(np.dot(weights, [arm_values[0][i], arm_values[1][i]])) for i in range(2))
             sds = [s.continuous_sd if s.continuous_sd is not None else (0., 0.) for s in (p, q)]
             continuous_sd = tuple(float(np.sqrt(np.sum((weights * np.array([sds[0][i], sds[1][i]])) ** 2)))
                                   for i in range(2))
