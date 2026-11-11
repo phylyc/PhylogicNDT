@@ -567,8 +567,12 @@ class League():
             self, query_res_df, cohort=None, final_event_list=None, keep_only_samples_w_event=None,
             remove_samps_w_event=None, keep_samps=None, remove_samps=None, num_games_against_each_opponent=2, final_samples=None,
             max_num_snvs=20, max_num_cnv_focal=20, max_num_homdel=5, max_num_cnv_arm_losses=15, max_num_cnv_arm_gains=15, max_num_cnv_arms=30, min_event_prevalence=0.05,
-            mutation_event_resolution='gene', hotspot_fn=None, drop_silent_mutations=None
+            mutation_event_resolution='gene', hotspot_fn=None, drop_silent_mutations=None, seed=None
     ):
+        # seed: None draws the seasons from the global np.random state, as before. An int or a np.random.SeedSequence
+        # gives this League its own Generator, so every season it plays (here, in run_permutation and in the
+        # adaptive refinement) follows from the seed alone.
+        self.rng = np.random.default_rng(seed) if seed is not None else None
 
         self.query_res_df = _normalize_comp_columns(query_res_df)
         self.seasons = []
@@ -1057,7 +1061,8 @@ class League():
         if samples is not None: sample_list = samples
         else: sample_list = self.event_pairs_per_samp.keys()
 
-        for samp in sample_list:
+        # Sorted: samples often come as a set, whose order follows PYTHONHASHSEED; the rates sum floats over samples.
+        for samp in sorted(sample_list):
             for pair in self.event_pairs_per_samp[samp].keys():
                 eve1,eve2 = pair
                 sorted_pair = tuple(sorted([eve1,eve2]))
@@ -1095,6 +1100,10 @@ class League():
 
     def run_league_model_iter(self,num_seasons):
 
+        rng = getattr(self, 'rng', None)
+        if rng is None:
+            rng = np.random
+
         self.event_positions = {}
         for eve in self.final_event_list:
             self.event_positions[eve] = []
@@ -1105,9 +1114,9 @@ class League():
             for k in range(self.num_games_against_each_opponent):
                 for event_pair in self.event_pairs.keys():
                     #if event_pair[0] not in final_event_list or event_pair[1] not in final_event_list: continue
-                    multinomial_draw = list(np.random.multinomial(1, [self.event_pairs[event_pair].mut1_win_rate,
-                                                                      self.event_pairs[event_pair].mut2_win_rate,
-                                                                      self.event_pairs[event_pair].draw_rate], size=1)[0])
+                    multinomial_draw = list(rng.multinomial(1, [self.event_pairs[event_pair].mut1_win_rate,
+                                                                self.event_pairs[event_pair].mut2_win_rate,
+                                                                self.event_pairs[event_pair].draw_rate], size=1)[0])
                     new_season.update_table_from_multinomial_sampling(event_pair, multinomial_draw)
 
             new_season.get_sorted_league()

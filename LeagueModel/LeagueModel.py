@@ -25,17 +25,23 @@ def _run_perm_chunk(payload):
     import random
     import numpy as np
 
-    seed = int(payload['seed'])
-    random.seed(seed)
-    np.random.seed(seed)
-
     league = _worker_league  # already loaded by _init_worker
+    seed_sequence = payload.get('seed_sequence')
+    if seed_sequence is None:
+        # Without --seed: the global state, seeded by chunk as before.
+        seed = int(payload['seed'])
+        random.seed(seed)
+        np.random.seed(seed)
+        league.rng = None
+    else:
+        # With --seed: this chunk's own Generator, spawned from the master seed, draws the subsets and the seasons.
+        league.rng = np.random.default_rng(seed_sequence)
     all_samps = sorted(set(league.events_per_samp.keys()))
     n_subset = int(len(all_samps) * float(payload['percent_subset']))
     n_subset = max(1, min(len(all_samps), n_subset)) if all_samps else 0
     out = []
     for _ in range(int(payload['n_perms_chunk'])):
-        rand_subset = set(random.sample(all_samps, n_subset)) if n_subset > 0 else set()
+        rand_subset = _random_subset(league.rng, all_samps, n_subset)
         league.run_permutation(
             num_seasons=int(payload['n_seasons']),
             samples=rand_subset,
@@ -43,6 +49,27 @@ def _run_perm_chunk(payload):
         )
         out.append(league.calc_odds())
     return out
+
+
+def _random_subset(rng, all_samps, n_subset):
+    """n_subset of the sorted samples all_samps: from rng, or from the global random module where rng is None."""
+    import random
+
+    if n_subset <= 0:
+        return set()
+    if rng is None:
+        return set(random.sample(all_samps, n_subset))
+    return set(all_samps[i] for i in rng.choice(len(all_samps), size=n_subset, replace=False))
+
+
+def _seed_sequences(seed):
+    """Two independent streams from --seed: the main League's, and the parent of the permutation chunks'."""
+    import numpy as np
+
+    if seed is None:
+        return None, None
+    main, permutations = np.random.SeedSequence(int(seed)).spawn(2)
+    return main, permutations
 
 
 def _append_odds_dict(league_model_run, odds_dict):
@@ -55,20 +82,19 @@ def _append_odds_dict(league_model_run, odds_dict):
 
 
 def _run_permutations_serial(league_model_run, all_samps, args):
-    import random
     import logging
 
     n_subset = int(len(all_samps) * args.percent_subset)
     n_subset = max(1, min(len(all_samps), n_subset)) if all_samps else 0
     for j in range(args.n_perms):
         logging.info('running iter:' + str(j))
-        rand_subset = set(random.sample(all_samps, n_subset)) if n_subset > 0 else set()
+        rand_subset = _random_subset(getattr(league_model_run, 'rng', None), all_samps, n_subset)
         league_model_run.run_permutation(num_seasons=args.n_seasons, samples=rand_subset,
                                          final_event_list=league_model_run.final_event_list)
         league_model_run.update_odds()
 
 
-def _run_permutations_parallel(league_model_run, args):
+def _run_permutations_parallel(league_model_run, args, permutation_seed_sequence=None):
     import logging
 
     n_jobs = max(1, args.n_jobs)
@@ -89,12 +115,16 @@ def _run_permutations_parallel(league_model_run, args):
     finally:
         league_model_run.query_res_df = saved_df  # restore for the main process
 
+    chunk_seed_sequences = [None] * n_chunks
+    if permutation_seed_sequence is not None:
+        chunk_seed_sequences = permutation_seed_sequence.spawn(n_chunks)
     payloads = []
     for chunk_id in range(n_chunks):
         n_chunk = min(chunk_size, int(args.n_perms) - chunk_id * chunk_size)
         payloads.append({
             'n_perms_chunk': int(n_chunk),
             'seed': base_seed + chunk_id,
+            'seed_sequence': chunk_seed_sequences[chunk_id],
             'n_seasons': int(args.n_seasons),
             'percent_subset': float(args.percent_subset),
             'final_event_list': final_event_list,
@@ -108,12 +138,15 @@ def _run_permutations_parallel(league_model_run, args):
                                  initializer=_init_worker,
                                  initargs=(league_pickle_path,)) as ex:
             futures = {ex.submit(_run_perm_chunk, payload): idx for idx, payload in enumerate(payloads)}
+            results = {}
             for fut in as_completed(futures):
                 chunk_idx = futures[fut]
-                odds_list = fut.result()
-                for odds_dict in odds_list:
-                    _append_odds_dict(league_model_run, odds_dict)
+                results[chunk_idx] = fut.result()
                 logging.info('completed permutation chunk %d/%d', chunk_idx + 1, n_chunks)
+        # Append in chunk order, not completion order, so the permutation rows do not depend on worker timing.
+        for chunk_idx in range(n_chunks):
+            for odds_dict in results[chunk_idx]:
+                _append_odds_dict(league_model_run, odds_dict)
     finally:
         try:
             os.unlink(league_pickle_path)
@@ -156,6 +189,7 @@ def run_league_model(args):
         return 0
 
     query_res_df1 = pd.read_csv(full_comp_fn, sep='\t')
+    main_seed_sequence, permutation_seed_sequence = _seed_sequences(getattr(args, 'seed', None))
 
     final_samples = None
     if args.final_sample_list is not None:
@@ -188,7 +222,8 @@ def run_league_model(args):
         min_event_prevalence=args.min_event_prevalence,
         mutation_event_resolution=args.mutation_event_resolution,
         hotspot_fn=args.hotspot_fn,
-        drop_silent_mutations=args.drop_silent_mutations
+        drop_silent_mutations=args.drop_silent_mutations,
+        seed=main_seed_sequence,
     )
     output = open(args.cohort + '.all_events.tsv', 'w')
     output.write('indiv\tevent\n')
@@ -243,7 +278,7 @@ def run_league_model(args):
     n_jobs = int(max(1, args.n_jobs))
     if int(args.n_perms) > 0:
         if n_jobs > 1 and int(args.n_perms) > 1:
-            _run_permutations_parallel(league_model_run, args)
+            _run_permutations_parallel(league_model_run, args, permutation_seed_sequence)
         else:
             _run_permutations_serial(league_model_run, sorted_all_samps, args)
 
