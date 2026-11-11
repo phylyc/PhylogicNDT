@@ -60,7 +60,7 @@ def main():
     })
     if args.sex:
         df["sex"] = args.sex
-    df.to_csv(args.outfile + ".timing.txt.gz", sep="\t", index=False)
+    df.to_csv(args.outfile + ".timing.txt", sep="\t", index=False)
 
 
 if __name__ == "__main__":
